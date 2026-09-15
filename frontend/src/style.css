@@ -1,0 +1,180 @@
+:root {
+  --text: #6b6375;
+  --text-h: #08060d;
+  --bg: #fff;
+  --border: #e5e4e7;
+  --tile-bg: #f8f7fb;
+  --accent: #aa3bff;
+  --accent-bg: rgba(170, 59, 255, 0.1);
+  --good: #1a9c5a;
+  --good-bg: rgba(26, 156, 90, 0.12);
+  --bad: #d13a3a;
+  --bad-bg: rgba(209, 58, 58, 0.12);
+
+  font: 18px/145% system-ui, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: light dark;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #9ca3af;
+    --text-h: #f3f4f6;
+    --bg: #16171d;
+    --border: #2e303a;
+    --tile-bg: #1f2028;
+    --accent: #c084fc;
+    --accent-bg: rgba(192, 132, 252, 0.15);
+    --good: #4ade80;
+    --good-bg: rgba(74, 222, 128, 0.15);
+    --bad: #f87171;
+    --bad-bg: rgba(248, 113, 113, 0.15);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#app {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  text-align: center;
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0 0 32px;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.empty-state .emoji {
+  font-size: 8rem;
+  line-height: 1;
+}
+
+.empty-state p {
+  max-width: 32ch;
+  color: var(--text);
+}
+
+.printer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 20px;
+  width: 100%;
+  max-width: 900px;
+}
+
+.printer-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 12px;
+  border: 2px solid var(--border);
+  border-radius: 16px;
+  background: var(--tile-bg);
+  transition: border-color 0.15s, background-color 0.15s, transform 0.1s;
+}
+
+.printer-tile .emoji {
+  font-size: 9rem;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.printer-tile .name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-h);
+  word-break: break-word;
+  pointer-events: none;
+}
+
+.printer-tile .address {
+  font-size: 12px;
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--text);
+  pointer-events: none;
+}
+
+.printer-tile .meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.printer-tile .model {
+  font-size: 11px;
+  color: var(--text);
+}
+
+.printer-tile .badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.printer-tile .status {
+  font-size: 13px;
+  min-height: 1.2em;
+  color: var(--text);
+  pointer-events: none;
+}
+
+.printer-tile.drag-ok {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  transform: scale(1.03);
+}
+
+.printer-tile.drag-bad {
+  border-color: var(--bad);
+  background: var(--bad-bg);
+  cursor: no-drop;
+}
+
+.printer-tile.sending {
+  opacity: 0.7;
+}
+
+.printer-tile.success {
+  border-color: var(--good);
+  background: var(--good-bg);
+}
+
+.printer-tile.success .status {
+  color: var(--good);
+}
+
+.printer-tile.failure {
+  border-color: var(--bad);
+  background: var(--bad-bg);
+}
+
+.printer-tile.failure .status {
+  color: var(--bad);
+}
