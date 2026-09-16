@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="240" alt="inkdrop logo"></p>
+
 # inkdrop
 
 Drag a PDF onto a printer icon and it prints, via IPP. Printers are discovered

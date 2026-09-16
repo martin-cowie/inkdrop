@@ -52,6 +52,35 @@ body {
   text-align: center;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.brand-mark {
+  display: block;
+  border-radius: 10px;
+  background: #fdfdfd;
+  padding: 5px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.brand-name {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+
+.brand-name .ink {
+  color: var(--text-h);
+}
+
+.brand-name .drop {
+  color: var(--accent);
+}
+
 h1 {
   font-size: 20px;
   font-weight: 600;

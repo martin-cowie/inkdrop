@@ -10,6 +10,13 @@ interface Printer {
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
+const BRAND_HTML = `
+  <div class="brand">
+    <img class="brand-mark" src="/logo-mark.png" alt="" width="40" height="40" />
+    <span class="brand-name"><span class="ink">ink</span><span class="drop">drop</span></span>
+  </div>
+`;
+
 function escapeHtml(value: string): string {
   const div = document.createElement('div');
   div.textContent = value;
@@ -19,6 +26,7 @@ function escapeHtml(value: string): string {
 function render(printers: Printer[]): void {
   if (printers.length === 0) {
     app.innerHTML = `
+      ${BRAND_HTML}
       <div class="empty-state">
         <div class="emoji">🤔</div>
         <p>No printers supporting URF or PWG-Raster have been found on the network yet.</p>
@@ -28,6 +36,7 @@ function render(printers: Printer[]): void {
   }
 
   app.innerHTML = `
+    ${BRAND_HTML}
     <h1>Drop a PDF on a printer</h1>
     <div class="printer-grid">
       ${printers
