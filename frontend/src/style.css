@@ -4,8 +4,8 @@
   --bg: #fff;
   --border: #e5e4e7;
   --tile-bg: #f8f7fb;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
+  --accent: #0060fb;
+  --accent-bg: rgba(0, 96, 251, 0.1);
   --good: #1a9c5a;
   --good-bg: rgba(26, 156, 90, 0.12);
   --bad: #d13a3a;
@@ -25,8 +25,8 @@
     --bg: #16171d;
     --border: #2e303a;
     --tile-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
+    --accent: #5b9dff;
+    --accent-bg: rgba(91, 157, 255, 0.15);
     --good: #4ade80;
     --good-bg: rgba(74, 222, 128, 0.15);
     --bad: #f87171;
