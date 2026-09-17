@@ -122,7 +122,17 @@ h1 {
   border: 2px solid var(--border);
   border-radius: 16px;
   background: var(--tile-bg);
+  cursor: pointer;
   transition: border-color 0.15s, background-color 0.15s, transform 0.1s;
+}
+
+.printer-tile:hover {
+  border-color: var(--accent);
+}
+
+.printer-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .printer-tile .emoji {
@@ -205,5 +215,26 @@ h1 {
 }
 
 .printer-tile.failure .status {
+  color: var(--bad);
+}
+
+@keyframes invalid-flash {
+  0%,
+  100% {
+    border-color: var(--border);
+    background: var(--tile-bg);
+  }
+  25%,
+  75% {
+    border-color: var(--bad);
+    background: var(--bad-bg);
+  }
+}
+
+.printer-tile.invalid {
+  animation: invalid-flash 0.5s ease-in-out;
+}
+
+.printer-tile.invalid .status {
   color: var(--bad);
 }

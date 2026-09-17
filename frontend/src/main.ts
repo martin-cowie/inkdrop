@@ -37,12 +37,13 @@ function render(printers: Printer[]): void {
 
   app.innerHTML = `
     ${BRAND_HTML}
-    <h1>Drop a PDF on a printer</h1>
+    <h1>Drop a PDF on a printer, or click one to choose a file</h1>
     <div class="printer-grid">
       ${printers
         .map(
           (p) => `
-        <div class="printer-tile" data-id="${escapeHtml(p.id)}">
+        <div class="printer-tile" data-id="${escapeHtml(p.id)}" tabindex="0" role="button"
+             aria-label="Print to ${escapeHtml(p.name)}">
           <div class="emoji">🖨️</div>
           <div class="name">${escapeHtml(p.name)}</div>
           <div class="address">${escapeHtml(p.address)}</div>
@@ -51,6 +52,7 @@ function render(printers: Printer[]): void {
             ${p.formats.map((f) => `<span class="badge">${escapeHtml(f)}</span>`).join('')}
           </div>
           <div class="status"></div>
+          <input type="file" class="file-input" accept="application/pdf" hidden />
         </div>
       `,
         )
@@ -70,19 +72,84 @@ function cssEscape(value: string): string {
   return typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value;
 }
 
-function draggedItemIsPdf(dataTransfer: DataTransfer): boolean {
-  return Array.from(dataTransfer.items).some(
-    (item) => item.kind === 'file' && item.type === 'application/pdf',
-  );
+/**
+ * Whether the drag looks droppable, for cursor/highlight feedback only —
+ * not the authoritative check, which happens at drop.
+ *
+ * Safari's `dataTransfer.items` is empty during dragenter/dragover for file
+ * drags — not just missing `.type`, the list itself has length 0 — while
+ * Chrome/Firefox already populate it with real MIME types at this point.
+ * See https://bugs.webkit.org/show_bug.cgi?id=223517. `dataTransfer.types`
+ * is the one signal that's reliable everywhere: it contains "Files" for
+ * any file drag, Safari included, even though `items` isn't usable yet.
+ */
+function draggedItemLooksDroppable(dataTransfer: DataTransfer): boolean {
+  if (!Array.from(dataTransfer.types).includes('Files')) {
+    return false; // not a file drag at all (e.g. dragging selected text)
+  }
+
+  const fileItems = Array.from(dataTransfer.items).filter((item) => item.kind === 'file');
+  const knownTypes = fileItems.map((item) => item.type).filter((type) => type !== '');
+  if (knownTypes.length === 0) {
+    return true; // Safari: items unavailable this early — stay permissive
+  }
+
+  return knownTypes.includes('application/pdf');
+}
+
+function isPdfFile(file: File): boolean {
+  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 }
 
 function wireTile(tile: HTMLDivElement, printer: Printer): void {
   const statusEl = tile.querySelector<HTMLDivElement>('.status')!;
+  const fileInput = tile.querySelector<HTMLInputElement>('.file-input')!;
   let resetTimer: ReturnType<typeof setTimeout> | undefined;
 
   const clearFeedback = () => {
     tile.classList.remove('drag-ok', 'drag-bad');
   };
+
+  const printFile = (file: File) => {
+    clearTimeout(resetTimer);
+
+    if (!isPdfFile(file)) {
+      tile.classList.remove('success', 'failure');
+      tile.classList.add('invalid');
+      statusEl.textContent = 'Not a PDF';
+      resetTimer = setTimeout(() => {
+        tile.classList.remove('invalid');
+        statusEl.textContent = '';
+      }, 1300);
+      return;
+    }
+
+    void sendPrintJob(printer, file, tile, statusEl).then(() => {
+      resetTimer = setTimeout(() => {
+        tile.classList.remove('success', 'failure', 'sending');
+        statusEl.textContent = '';
+      }, 3000);
+    });
+  };
+
+  // Drag-and-drop isn't always available (touch devices, some accessibility
+  // setups) — clicking or pressing Enter/Space opens a native file picker
+  // as a fallback. The hidden <input> does the actual browsing.
+  tile.addEventListener('click', () => fileInput.click());
+  tile.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      fileInput.click();
+    }
+  });
+
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = ''; // allow picking the same file again next time
+    if (file) {
+      printFile(file);
+    }
+  });
 
   tile.addEventListener('dragenter', (event) => {
     event.preventDefault();
@@ -93,10 +160,10 @@ function wireTile(tile: HTMLDivElement, printer: Printer): void {
     const dataTransfer = event.dataTransfer;
     if (!dataTransfer) return;
 
-    const isPdf = draggedItemIsPdf(dataTransfer);
-    dataTransfer.dropEffect = isPdf ? 'copy' : 'none';
-    tile.classList.toggle('drag-ok', isPdf);
-    tile.classList.toggle('drag-bad', !isPdf);
+    const looksDroppable = draggedItemLooksDroppable(dataTransfer);
+    dataTransfer.dropEffect = looksDroppable ? 'copy' : 'none';
+    tile.classList.toggle('drag-ok', looksDroppable);
+    tile.classList.toggle('drag-bad', !looksDroppable);
   });
 
   tile.addEventListener('dragleave', () => {
@@ -108,17 +175,9 @@ function wireTile(tile: HTMLDivElement, printer: Printer): void {
     clearFeedback();
 
     const file = event.dataTransfer?.files[0];
-    if (!file || file.type !== 'application/pdf') {
-      return;
+    if (file) {
+      printFile(file);
     }
-
-    clearTimeout(resetTimer);
-    void sendPrintJob(printer, file, tile, statusEl).then(() => {
-      resetTimer = setTimeout(() => {
-        tile.classList.remove('success', 'failure', 'sending');
-        statusEl.textContent = '';
-      }, 3000);
-    });
   });
 }
 

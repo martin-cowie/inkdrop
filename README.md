@@ -90,6 +90,11 @@ IPP servers are often single-threaded and can become unresponsive (stop
 answering pings entirely) if hit with several large print jobs in quick
 succession — if that happens, give it a minute, or power-cycle it.
 
+**Don't have a spare printer, or don't want to burn paper and ink on every
+test?** See [simulator/](simulator/) — a fake IPP printer that advertises
+itself over mDNS just like a real one, and turns PWG-Raster print jobs back
+into viewable PNGs instead of physical pages.
+
 ## Troubleshooting
 
 - **No printers show up**: Confirm the printer and this machine are on the
