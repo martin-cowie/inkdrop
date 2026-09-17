@@ -106,8 +106,8 @@ h1 {
 }
 
 .printer-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 20px;
   width: 100%;
   max-width: 900px;
