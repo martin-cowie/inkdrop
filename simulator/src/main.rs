@@ -77,7 +77,7 @@ async fn main() {
     mdns.register(service_info).expect("failed to register mDNS service");
     tracing::info!(%fullname, port, "advertising via mDNS");
 
-    let serve = axum::serve(listener, app);
+    let serve = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>());
     tokio::select! {
         result = serve => {
             if let Err(err) = result {

@@ -1,9 +1,10 @@
 use std::io::{Cursor, Read};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode as HttpStatusCode;
 use ipp::attribute::{IppAttribute, IppAttributes};
 use ipp::model::{DelimiterTag, JobState, Operation, PrinterState, StatusCode};
@@ -24,18 +25,22 @@ pub struct AppState {
 /// Handles a raw `application/ipp` POST body and returns the raw response
 /// bytes (header + attributes; no trailing payload — this simulator never
 /// sends a document back).
-pub async fn handle(State(state): State<AppState>, body: Bytes) -> (HttpStatusCode, Bytes) {
-    let response = match process(&state, body) {
+pub async fn handle(
+    State(state): State<AppState>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    body: Bytes,
+) -> (HttpStatusCode, Bytes) {
+    let response = match process(&state, client_addr, body) {
         Ok(response) => response,
         Err(err) => {
-            warn!(%err, "failed to parse IPP request");
+            warn!(%err, %client_addr, "failed to parse IPP request");
             error_response(StatusCode::ClientErrorBadRequest, 0)
         }
     };
     (HttpStatusCode::OK, response.to_bytes())
 }
 
-fn process(state: &AppState, body: Bytes) -> Result<IppRequestResponse, ipp::parser::IppParseError> {
+fn process(state: &AppState, client_addr: SocketAddr, body: Bytes) -> Result<IppRequestResponse, ipp::parser::IppParseError> {
     let cursor = Cursor::new(body);
     let (header, attributes, reader) = IppParser::new(cursor).parse_parts()?;
 
@@ -43,11 +48,11 @@ fn process(state: &AppState, body: Bytes) -> Result<IppRequestResponse, ipp::par
     reader.into_inner().read_to_end(&mut document).expect("reading from an in-memory buffer cannot fail");
 
     let operation = Operation::from_i16(header.operation_or_status);
-    info!(?operation, request_id = header.request_id, document_bytes = document.len(), "received IPP request");
+    info!(?operation, request_id = header.request_id, document_bytes = document.len(), %client_addr, "received IPP request");
 
     let response = match operation {
         Some(Operation::GetPrinterAttributes) => get_printer_attributes(header.request_id),
-        Some(Operation::PrintJob) => print_job(state, &attributes, document, header.request_id),
+        Some(Operation::PrintJob) => print_job(state, client_addr, &attributes, document, header.request_id),
         Some(Operation::ValidateJob) => success_response(header.request_id),
         _ => {
             warn!(?operation, "unhandled IPP operation; returning a generic success");
@@ -107,7 +112,13 @@ fn get_printer_attributes(request_id: i32) -> IppRequestResponse {
     response
 }
 
-fn print_job(state: &AppState, request: &IppAttributes, document: Vec<u8>, request_id: i32) -> IppRequestResponse {
+fn print_job(
+    state: &AppState,
+    client_addr: SocketAddr,
+    request: &IppAttributes,
+    document: Vec<u8>,
+    request_id: i32,
+) -> IppRequestResponse {
     let op_group = request.first_of(DelimiterTag::OperationAttributes);
     let document_format = op_group
         .and_then(|g| g.get("document-format"))
@@ -117,11 +128,21 @@ fn print_job(state: &AppState, request: &IppAttributes, document: Vec<u8>, reque
 
     let job_id = state.next_job_id.fetch_add(1, Ordering::SeqCst);
 
-    match state.jobs.save(job_id, &document_format, job_name.as_deref(), &document) {
+    match state.jobs.save(&document_format, job_name.as_deref(), &document) {
         Ok(saved) => {
-            info!(job_id, %document_format, bytes = document.len(), path = %saved.path.display(), pages_previewed = saved.preview_pages, "saved print job");
+            let png_paths: Vec<_> = saved.png_paths.iter().map(|p| p.display().to_string()).collect();
+            info!(
+                job_id,
+                client_ip = %client_addr.ip(),
+                %document_format,
+                bytes = document.len(),
+                path = %saved.path.display(),
+                pages_previewed = saved.preview_pages,
+                ?png_paths,
+                "saved print job"
+            );
             if let Some(preview_error) = saved.preview_error {
-                warn!(job_id, %document_format, error = %preview_error, "document claimed to be PWG-Raster but failed to decode — treating as a real printer would: rejecting the job");
+                warn!(job_id, client_ip = %client_addr.ip(), %document_format, error = %preview_error, "document claimed to be PWG-Raster but failed to decode — treating as a real printer would: rejecting the job");
                 let mut response = error_response(StatusCode::ClientErrorDocumentFormatError, request_id);
                 response
                     .attributes_mut()
@@ -130,7 +151,7 @@ fn print_job(state: &AppState, request: &IppAttributes, document: Vec<u8>, reque
             }
         }
         Err(err) => {
-            warn!(job_id, %document_format, %err, "failed to save print job");
+            warn!(job_id, client_ip = %client_addr.ip(), %document_format, %err, "failed to save print job");
         }
     }
 
