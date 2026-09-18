@@ -18,17 +18,26 @@ pub enum RenderError {
     Pdfium(#[from] PdfiumError),
 }
 
+static INSTANCE: OnceLock<Pdfium> = OnceLock::new();
+
 fn pdfium() -> &'static Pdfium {
-    static INSTANCE: OnceLock<Pdfium> = OnceLock::new();
     INSTANCE.get_or_init(|| {
-        let bindings = Pdfium::bind_to_library(pdfium_library_path())
-            .or_else(|_| Pdfium::bind_to_system_library())
-            .expect(
-                "failed to load the PDFium library; set PDFIUM_DYNAMIC_LIB_PATH to the \
-                 directory containing it, or install it as a system library",
-            );
-        Pdfium::new(bindings)
+        bind_pdfium().expect("PDFium was verified available at startup via ensure_available(); this should not fail")
     })
+}
+
+fn bind_pdfium() -> Result<Pdfium, PdfiumError> {
+    let bindings = Pdfium::bind_to_library(pdfium_library_path()).or_else(|_| Pdfium::bind_to_system_library())?;
+    Ok(Pdfium::new(bindings))
+}
+
+/// Verifies PDFium can be loaded and caches the bound instance, so a missing
+/// or blocked library (e.g. macOS Gatekeeper quarantining `libpdfium.dylib`)
+/// is reported clearly at startup instead of surfacing mid-print.
+pub fn ensure_available() -> Result<(), PdfiumError> {
+    let instance = bind_pdfium()?;
+    let _ = INSTANCE.set(instance);
+    Ok(())
 }
 
 fn pdfium_library_path() -> std::path::PathBuf {

@@ -25,6 +25,11 @@ async fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("inkdrop=info")))
         .init();
 
+    if let Err(err) = pdf::ensure_available() {
+        tracing::error!(%err, "PDFium is unavailable; Cannot start");
+        std::process::exit(1);
+    }
+
     let (registry, _) = watch::channel(HashMap::new());
     discovery::spawn(registry.clone());
 
