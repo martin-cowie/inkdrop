@@ -55,5 +55,7 @@ async fn main() {
     let listener = TcpListener::bind(addr).await.expect("failed to bind listener");
     tracing::info!(%addr, "inkdrop listening");
 
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .expect("server error");
 }

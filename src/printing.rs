@@ -1,8 +1,10 @@
 use std::io::Cursor;
+use std::net::IpAddr;
 
 use bytes::Bytes;
 use ipp::parser::IppParseError;
 use ipp::prelude::*;
+use tracing::info;
 
 use crate::discovery::Printer;
 use crate::raster::ColorMode;
@@ -32,17 +34,22 @@ enum PrintPlan {
 
 /// Confirm how the printer wants the document, converting if necessary, then
 /// submit it as a Print-Job.
-pub async fn print_pdf(printer: &Printer, job_title: &str, document: Bytes) -> Result<(), PrintError> {
+pub async fn print_pdf(printer: &Printer, job_title: &str, client_ip: IpAddr, document: Bytes) -> Result<(), PrintError> {
     let uri: Uri = printer.ipp_uri().parse()?;
     let client = AsyncIppClient::new(uri.clone());
 
     let plan = plan_print(&client, uri.clone()).await?;
 
     let (payload, document_format) = match plan {
-        PrintPlan::DirectPdf => (IppPayload::new(Cursor::new(document)), "application/pdf"),
+        PrintPlan::DirectPdf => {
+            info!(%client_ip, %job_title, "printer accepts PDF directly; sending document as-is");
+            (IppPayload::new(Cursor::new(document)), "application/pdf")
+        }
         PrintPlan::PwgRaster { dpi, color } => {
-            let pages = crate::pdf::render_pages(&document, dpi as f32)?;
+            info!(%client_ip, %job_title, dpi, ?color, "printer requires PWG-Raster; rendering PDF page by page");
+            let pages = crate::pdf::render_pages(&document, dpi as f32, job_title, client_ip)?;
             let raster = crate::raster::encode(&pages, dpi, color);
+            info!(%client_ip, %job_title, page_count = pages.len(), "encoded raster document");
             (IppPayload::new(Cursor::new(raster)), "image/pwg-raster")
         }
     };
@@ -58,6 +65,7 @@ pub async fn print_pdf(printer: &Printer, job_title: &str, document: Bytes) -> R
         return Err(PrintError::Ipp(IppError::StatusError(response.header().status_code())));
     }
 
+    info!(%client_ip, %job_title, "print job accepted by printer");
     Ok(())
 }
 

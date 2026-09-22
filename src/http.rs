@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{ConnectInfo, Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use futures_util::stream::{Stream, StreamExt};
 use serde::Serialize;
 use tokio_stream::wrappers::WatchStream;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::discovery::{Printer, Registry};
 use crate::printing::{self, PrintError};
@@ -56,6 +57,7 @@ pub async fn printers_stream(
 pub async fn print_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     mut multipart: Multipart,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let printer = {
@@ -85,7 +87,15 @@ pub async fn print_handler(
         .await
         .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
 
-    printing::print_pdf(&printer, &job_title, document)
+    info!(
+        client_ip = %client_addr.ip(),
+        printer_id = %id,
+        job_title = %job_title,
+        bytes = document.len(),
+        "received PDF print job"
+    );
+
+    printing::print_pdf(&printer, &job_title, client_addr.ip(), document)
         .await
         .map_err(|err| match err {
             PrintError::UnsupportedFormat => (
@@ -93,7 +103,7 @@ pub async fn print_handler(
                 "printer no longer supports PDF".to_owned(),
             ),
             other => {
-                error!(error = %other, "print job failed");
+                error!(client_ip = %client_addr.ip(), job_title = %job_title, error = %other, "print job failed");
                 (StatusCode::BAD_GATEWAY, "printer rejected the job".to_owned())
             }
         })?;

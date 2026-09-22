@@ -1,6 +1,8 @@
+use std::net::IpAddr;
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::*;
+use tracing::info;
 
 /// One rasterized PDF page, ready for raster encoding.
 pub struct RenderedPage {
@@ -46,17 +48,31 @@ fn pdfium_library_path() -> std::path::PathBuf {
 }
 
 /// Render every page of `pdf_bytes` to an RGB8 bitmap at `dpi` dots per inch.
-pub fn render_pages(pdf_bytes: &[u8], dpi: f32) -> Result<Vec<RenderedPage>, RenderError> {
+/// `job_title` and `client_ip` are only used to correlate the page-by-page
+/// progress log lines with the request that triggered them.
+pub fn render_pages(pdf_bytes: &[u8], dpi: f32, job_title: &str, client_ip: IpAddr) -> Result<Vec<RenderedPage>, RenderError> {
     let document = pdfium().load_pdf_from_byte_slice(pdf_bytes, None)?;
+    let total_pages = document.pages().len();
 
     document
         .pages()
         .iter()
-        .map(|page| {
+        .enumerate()
+        .map(|(index, page)| {
             let width_pts = page.width().value;
             let height_pts = page.height().value;
             let width_px = ((width_pts / 72.0) * dpi).round().max(1.0) as i32;
             let height_px = ((height_pts / 72.0) * dpi).round().max(1.0) as i32;
+
+            info!(
+                %client_ip,
+                %job_title,
+                page = index + 1,
+                total_pages,
+                width_px,
+                height_px,
+                "rendering page"
+            );
 
             let bitmap = page.render_with_config(
                 &PdfRenderConfig::new()
