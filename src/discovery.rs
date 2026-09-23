@@ -9,8 +9,8 @@ use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-/// A printer, discovered via mDNS or configured by URI, that handles URF or
-/// PWG-Raster.
+/// A printer, discovered via mDNS or configured by URI, that handles at least
+/// one of [`crate::raster::SUPPORTED_FORMATS`].
 #[derive(Clone, Debug)]
 pub struct Printer {
     pub id: String,
@@ -21,8 +21,8 @@ pub struct Printer {
     pub resource_path: String,
     /// Model string from the TXT "ty" key, e.g. "DeskJet 3630 series".
     pub model: Option<String>,
-    /// Display labels of the raster formats this printer accepts, e.g.
-    /// `["URF", "PWG-Raster"]`. Always non-empty for a printer in the
+    /// Display labels of the formats this printer accepts, e.g.
+    /// `["PDF", "URF", "PWG-Raster"]`. Always non-empty for a printer in the
     /// registry.
     pub formats: Vec<&'static str>,
 }
@@ -88,7 +88,7 @@ const CONFIGURED_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Add printers given by URI (e.g. `ipp://localhost:1631/ipp/print`) to
 /// `registry`, bypassing mDNS. Each is probed over IPP periodically, and is
-/// listed only while it answers and handles URF or PWG-Raster.
+/// listed only while it answers and handles a supported format.
 pub fn spawn_configured(uris: Vec<String>, registry: Registry) {
     for uri in uris {
         let registry = registry.clone();
@@ -145,7 +145,7 @@ async fn configured_printer(uri: &Uri, id: String) -> Result<Printer, String> {
 
     let info = crate::printing::probe_printer(uri).await.map_err(|err| err.to_string())?;
     if info.formats.is_empty() {
-        return Err("printer does not handle URF or PWG-Raster".to_owned());
+        return Err("printer does not handle a supported format".to_owned());
     }
 
     Ok(Printer {
@@ -223,7 +223,7 @@ fn handle_resolved(
             upsert_transport(id.clone(), secure, printer, registry, merge_state);
         }
         // No "pdl" TXT key at all: some printers omit it even though they
-        // support URF or PWG-Raster. Ask the printer directly.
+        // support one of our formats. Ask the printer directly.
         _ => {
             let printer = build_printer(&info, id.clone(), Vec::new())?;
             let registry = registry.clone();
@@ -232,9 +232,9 @@ fn handle_resolved(
                 let Ok(uri) = printer.ipp_uri().parse() else {
                     return;
                 };
-                let formats = crate::printing::probe_raster_formats(&uri).await;
+                let formats = crate::printing::probe_formats(&uri).await;
                 if formats.is_empty() {
-                    debug!(name = %printer.name, "printer does not handle URF or PWG-Raster");
+                    debug!(name = %printer.name, "printer does not handle a supported format");
                     return;
                 }
 

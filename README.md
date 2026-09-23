@@ -4,9 +4,9 @@
 
 Drag a PDF onto a printer icon and it prints, via IPP. Printers are discovered
 automatically on the local network via mDNS, and only printers that handle
-**URF** or **PWG-Raster** are shown — the two formats inkdrop can target.
-When a printer doesn't take PDF directly, the PDF is rasterized locally and
-sent as PWG-Raster instead.
+**PDF**, **URF** or **PWG-Raster** are shown, with a badge for each. When a
+printer doesn't take PDF directly, the PDF is rasterized locally and sent as
+PWG-Raster instead.
 
 ## Prerequisites
 
@@ -14,7 +14,7 @@ sent as PWG-Raster instead.
 - Node.js + npm
 - The PDFium native library (used to rasterize PDFs — see below)
 - At least one printer on the same network/subnet as this machine that
-  advertises URF or PWG-Raster support (most AirPrint / IPP Everywhere
+  advertises support for one of those formats (most AirPrint / IPP Everywhere
   printers do). mDNS discovery requires being on the same L2 network segment
   as the printer — it will not find printers across VPNs or routed subnets.
 
@@ -73,7 +73,7 @@ INKDROP_PRINTERS=ipp://localhost:1631/ipp/print PDFIUM_DYNAMIC_LIB_PATH=/path/to
 ```
 
 Each is checked over IPP every 10 seconds and shown while it answers and
-handles URF or PWG-Raster, so it can be started after inkdrop. Use `cargo run --release`
+handles a supported format, so it can be started after inkdrop. Use `cargo run --release`
 for an optimized build.
 
 ## Testing it

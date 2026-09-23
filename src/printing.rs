@@ -148,16 +148,16 @@ pub struct PrinterInfo {
     /// `printer-info`, falling back to `printer-name`.
     pub name: Option<String>,
     pub model: Option<String>,
-    /// Display labels of the raster formats it accepts (see
+    /// Display labels of the formats it accepts (see
     /// [`crate::raster::matching_labels`]).
     pub formats: Vec<&'static str>,
 }
 
-/// Query the printer directly for the raster formats it advertises, for use
+/// Query the printer directly for the formats it advertises, for use
 /// when mDNS TXT records don't mention "pdl" at all. Any failure
 /// (unreachable, malformed response, etc.) is treated as "none" rather than
 /// propagated, since this is a best-effort discovery-time probe.
-pub async fn probe_raster_formats(uri: &Uri) -> Vec<&'static str> {
+pub async fn probe_formats(uri: &Uri) -> Vec<&'static str> {
     match probe_printer(uri).await {
         Ok(info) => info.formats,
         Err(err) => {

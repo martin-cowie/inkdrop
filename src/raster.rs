@@ -5,9 +5,14 @@ use bytes::{BufMut, Bytes, BytesMut};
 use crate::pdf::RenderedPage;
 
 /// (IPP document-format MIME type, short display label) pairs for the
-/// raster formats inkdrop knows how to target. A printer qualifies for
-/// display if it advertises (or is confirmed to accept) any of these.
-pub const SUPPORTED_FORMATS: &[(&str, &str)] = &[("image/urf", "URF"), ("image/pwg-raster", "PWG-Raster")];
+/// formats inkdrop knows how to target: PDF sent as-is, or a raster format.
+/// A printer qualifies for display if it advertises (or is confirmed to
+/// accept) any of these.
+pub const SUPPORTED_FORMATS: &[(&str, &str)] = &[
+    ("application/pdf", "PDF"),
+    ("image/urf", "URF"),
+    ("image/pwg-raster", "PWG-Raster"),
+];
 
 /// Match `formats` (document-format strings, from either an mDNS "pdl" TXT
 /// value or a live `document-format-supported` response) against

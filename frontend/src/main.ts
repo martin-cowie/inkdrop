@@ -29,7 +29,7 @@ function render(printers: Printer[]): void {
       ${BRAND_HTML}
       <div class="empty-state">
         <div class="emoji">🤔</div>
-        <p>No printers supporting URF or PWG-Raster have been found on the network yet.</p>
+        <p>No printers that handle supported formats have been found on the network yet.</p>
       </div>
     `;
     return;
