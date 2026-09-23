@@ -312,4 +312,141 @@ mod tests {
         assert_eq!(&header[..10], b"PwgRaster\0");
         assert_eq!(&header[1732..1748], b"iso_a4_210x297mm");
     }
+
+    fn be_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn page(width_px: u32, height_px: u32, rgb: Vec<u8>) -> RenderedPage {
+        RenderedPage { width_px, height_px, width_pts: 612.0, height_pts: 792.0, rgb }
+    }
+
+    #[test]
+    fn matching_labels_follow_supported_order_ignoring_case() {
+        let labels = matching_labels(["IMAGE/PWG-RASTER", "text/plain", "application/pdf", "image/urf"].into_iter());
+        assert_eq!(labels, ["PDF", "URF", "PWG-Raster"]);
+        assert!(matching_labels(["image/jpeg"].into_iter()).is_empty());
+        assert!(matching_labels(std::iter::empty()).is_empty());
+    }
+
+    #[test]
+    fn header_fields_sit_at_their_pwg_offsets() {
+        let page = RenderedPage { width_px: 1700, height_px: 2200, width_pts: 612.4, height_pts: 791.6, rgb: Vec::new() };
+
+        let header = page_header(&page, 200, ColorMode::Srgb8, 3);
+        assert_eq!(be_u32(&header, 276), 200, "HWResolution[0]");
+        assert_eq!(be_u32(&header, 280), 200, "HWResolution[1]");
+        assert_eq!(be_u32(&header, 340), 1, "NumCopies");
+        assert_eq!(be_u32(&header, 352), 612, "PageSize[0], rounded");
+        assert_eq!(be_u32(&header, 356), 792, "PageSize[1], rounded");
+        assert_eq!(be_u32(&header, 372), 1700, "Width");
+        assert_eq!(be_u32(&header, 376), 2200, "Height");
+        assert_eq!(be_u32(&header, 384), 8, "BitsPerColor");
+        assert_eq!(be_u32(&header, 388), 24, "BitsPerPixel");
+        assert_eq!(be_u32(&header, 392), 1700 * 3, "BytesPerLine");
+        assert_eq!(be_u32(&header, 400), CUPS_CSPACE_SRGB, "ColorSpace");
+        assert_eq!(be_u32(&header, 420), 3, "NumColors");
+        assert_eq!(be_u32(&header, 452), 3, "TotalPageCount");
+        assert_eq!(be_u32(&header, 456), 1, "CrossFeedTransform");
+        assert_eq!(be_u32(&header, 460), 1, "FeedTransform");
+        assert_eq!(be_u32(&header, 472), 1700, "ImageBoxRight");
+        assert_eq!(be_u32(&header, 476), 2200, "ImageBoxBottom");
+        assert_eq!(&header[1732..1751], b"na_letter_8.5x11in\0");
+
+        let gray = page_header(&page, 300, ColorMode::Sgray8, 1);
+        assert_eq!(be_u32(&gray, 388), 8, "BitsPerPixel");
+        assert_eq!(be_u32(&gray, 392), 1700, "BytesPerLine");
+        assert_eq!(be_u32(&gray, 400), CUPS_CSPACE_SW, "ColorSpace");
+        assert_eq!(be_u32(&gray, 420), 1, "NumColors");
+    }
+
+    #[test]
+    fn page_size_names_allow_a_little_slack() {
+        let named = |width_pts, height_pts| {
+            page_size_name(&RenderedPage { width_px: 1, height_px: 1, width_pts, height_pts, rgb: Vec::new() })
+        };
+        assert_eq!(named(595.0, 842.0), "iso_a4_210x297mm");
+        assert_eq!(named(596.9, 840.1), "iso_a4_210x297mm");
+        assert_eq!(named(420.0, 595.0), "iso_a5_148x210mm");
+        assert_eq!(named(842.0, 1191.0), "iso_a3_297x420mm");
+        assert_eq!(named(612.0, 792.0), "na_letter_8.5x11in");
+        assert_eq!(named(612.0, 1008.0), "na_legal_8.5x14in");
+        assert_eq!(named(842.0, 595.0), "", "landscape A4 isn't a PWG name");
+        assert_eq!(named(598.0, 842.0), "", "beyond the 2pt slack");
+        assert_eq!(named(100.0, 100.0), "");
+    }
+
+    /// Split an encoded document back into (header, decoded pixels) pages.
+    fn decode(mut data: &[u8], bpp: usize) -> Vec<([u8; HEADER_LEN], Vec<u8>)> {
+        assert_eq!(&data[..4], SYNC_WORD);
+        data = &data[4..];
+        let mut pages = Vec::new();
+        while !data.is_empty() {
+            let header: [u8; HEADER_LEN] = data[..HEADER_LEN].try_into().unwrap();
+            data = &data[HEADER_LEN..];
+            let (width, height) = (be_u32(&header, 372) as usize, be_u32(&header, 376) as usize);
+            let mut pixels = Vec::new();
+            let mut lines = 0;
+            while lines < height {
+                let repeat = data[0] as usize;
+                data = &data[1..];
+                let line = decompress_line(&mut data, width, bpp);
+                for _ in 0..=repeat {
+                    pixels.extend_from_slice(&line);
+                }
+                lines += repeat + 1;
+            }
+            assert_eq!(lines, height, "line repeats overran the page");
+            pages.push((header, pixels));
+        }
+        pages
+    }
+
+    #[test]
+    fn encode_writes_every_page_in_color() {
+        let red_white = [255, 0, 0, 255, 255, 255].repeat(2);
+        let pages = [page(2, 2, red_white.clone()), page(1, 1, vec![1, 2, 3])];
+
+        let encoded = encode(&pages, 300, ColorMode::Srgb8);
+
+        let decoded = decode(&encoded, 3);
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].1, red_white);
+        assert_eq!(decoded[1].1, [1, 2, 3]);
+        assert_eq!(be_u32(&decoded[0].0, 452), 2, "TotalPageCount");
+        assert_eq!(be_u32(&decoded[1].0, 452), 2, "TotalPageCount");
+    }
+
+    #[test]
+    fn encode_converts_to_luma_in_gray() {
+        let pixels = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255].to_vec();
+
+        let encoded = encode(&[page(4, 1, pixels)], 150, ColorMode::Sgray8);
+
+        let decoded = decode(&encoded, 1);
+        assert_eq!(decoded[0].1, [76, 149, 29, 255]);
+        assert_eq!(be_u32(&decoded[0].0, 276), 150);
+    }
+
+    #[test]
+    fn encode_with_no_pages_is_just_the_sync_word() {
+        assert_eq!(&encode(&[], 300, ColorMode::Srgb8)[..], SYNC_WORD);
+    }
+
+    #[test]
+    fn compress_line_splits_long_runs_and_literals() {
+        // 300 identical pixels: runs of 128, 128 and 44.
+        let mut out = BytesMut::new();
+        compress_line(&mut out, &[9; 300], 1);
+        assert_eq!(&out[..], &[127, 9, 127, 9, 43, 9]);
+
+        // 130 distinct pixels: a literal of 128, then a literal of 2.
+        let distinct: Vec<u8> = (0..130).collect();
+        let mut out = BytesMut::new();
+        compress_line(&mut out, &distinct, 1);
+        assert_eq!(out[0], 129);
+        assert_eq!(&out[1..129], &distinct[..128]);
+        assert_eq!(out[129], 255);
+        assert_eq!(&out[130..], &distinct[128..]);
+    }
 }

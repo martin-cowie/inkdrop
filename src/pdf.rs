@@ -28,7 +28,11 @@ fn pdfium() -> &'static Pdfium {
 }
 
 fn bind_pdfium() -> Result<Pdfium, PdfiumError> {
-    let bindings = match pdfium_library_path() {
+    bind_pdfium_at(pdfium_library_path())
+}
+
+fn bind_pdfium_at(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumError> {
+    let bindings = match library {
         Some(path) => Pdfium::bind_to_library(path).or_else(|_| Pdfium::bind_to_system_library())?,
         None => Pdfium::bind_to_system_library()?,
     };
@@ -44,9 +48,14 @@ pub fn ensure_available() -> Result<(), PdfiumError> {
     Ok(())
 }
 
-/// `PDFIUM_DYNAMIC_LIB_PATH` if set, otherwise the copy `build.rs` downloaded.
 fn pdfium_library_path() -> Option<std::path::PathBuf> {
-    let dir = std::env::var("PDFIUM_DYNAMIC_LIB_PATH").ok().or_else(|| option_env!("INKDROP_PDFIUM_LIB_DIR").map(str::to_owned))?;
+    library_path(std::env::var("PDFIUM_DYNAMIC_LIB_PATH").ok(), option_env!("INKDROP_PDFIUM_LIB_DIR"))
+}
+
+/// The library in `configured` (`PDFIUM_DYNAMIC_LIB_PATH`) if set, otherwise
+/// in `downloaded`, the directory `build.rs` downloaded PDFium to.
+fn library_path(configured: Option<String>, downloaded: Option<&str>) -> Option<std::path::PathBuf> {
+    let dir = configured.or_else(|| downloaded.map(str::to_owned))?;
     Some(Pdfium::pdfium_platform_library_name_at_path(&dir))
 }
 
@@ -97,4 +106,73 @@ pub fn render_pages(pdf_bytes: &[u8], dpi: f32) -> Result<Vec<RenderedPage>, Ren
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{self, A4};
+
+    #[test]
+    fn library_path_prefers_the_configured_directory() {
+        let configured = library_path(Some("/opt/pdfium".to_owned()), Some("/downloaded"));
+        assert_eq!(configured, Some(Pdfium::pdfium_platform_library_name_at_path("/opt/pdfium")));
+
+        let downloaded = library_path(None, Some("/downloaded"));
+        assert_eq!(downloaded, Some(Pdfium::pdfium_platform_library_name_at_path("/downloaded")));
+
+        assert_eq!(library_path(None, None), None);
+    }
+
+    #[test]
+    fn the_downloaded_library_is_available() {
+        assert!(option_env!("INKDROP_PDFIUM_LIB_DIR").is_some(), "build.rs should have downloaded PDFium");
+        ensure_available().expect("PDFium should load");
+    }
+
+    #[test]
+    fn binding_a_missing_library_fails() {
+        // Falls back to a system-wide PDFium, which the test machines lack.
+        let missing = Some(std::path::PathBuf::from("/nonexistent/libpdfium.so"));
+        assert!(bind_pdfium_at(missing).is_err());
+        assert!(bind_pdfium_at(None).is_err());
+    }
+
+    #[test]
+    fn renders_each_page_at_the_requested_resolution() {
+        test_support::init_tracing();
+        let pdf = test_support::pdf(&[A4, (612.0, 792.0)]);
+
+        let pages = render_pages(&pdf, 72.0).unwrap();
+
+        assert_eq!(pages.len(), 2);
+        let a4 = &pages[0];
+        assert_eq!((a4.width_px, a4.height_px), (595, 842));
+        assert_eq!((a4.width_pts, a4.height_pts), A4);
+        assert_eq!(a4.rgb.len(), 595 * 842 * 3);
+        assert_eq!((pages[1].width_px, pages[1].height_px), (612, 792));
+
+        // The red square spans 10-30pt from the bottom-left; rows run top down.
+        let pixel = |x: usize, y_from_bottom: usize| {
+            let offset = ((842 - 1 - y_from_bottom) * 595 + x) * 3;
+            &a4.rgb[offset..offset + 3]
+        };
+        assert_eq!(pixel(20, 20), [255, 0, 0]);
+        assert_eq!(pixel(300, 400), [255, 255, 255]);
+
+        let doubled = render_pages(&pdf, 144.0).unwrap();
+        assert_eq!((doubled[0].width_px, doubled[0].height_px), (1190, 1684));
+    }
+
+    #[test]
+    fn tiny_pages_render_at_least_one_pixel() {
+        let pages = render_pages(&test_support::pdf(&[(1.0, 1.0)]), 10.0).unwrap();
+        assert_eq!((pages[0].width_px, pages[0].height_px), (1, 1));
+    }
+
+    #[test]
+    fn rejects_bytes_that_are_not_a_pdf() {
+        let err = render_pages(b"not a pdf", 72.0).err().expect("should fail");
+        assert!(err.to_string().starts_with("PDFium error: "), "{err}");
+    }
 }

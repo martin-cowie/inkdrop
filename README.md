@@ -11,7 +11,7 @@ PWG-Raster instead.
 ## Prerequisites
 
 - Rust (stable toolchain, `cargo`)
-- Node.js + npm
+- Node.js 22.12+ and npm
 - The PDFium native library (used to rasterize PDFs — see below)
 - At least one printer on the same network/subnet as this machine that
   advertises support for one of those formats (most AirPrint / IPP Everywhere
@@ -194,3 +194,30 @@ cd frontend && npm run dev                        # terminal 2, Vite dev server 
 
 `frontend/vite.config.ts` proxies `/api/*` requests from the Vite dev server
 to `localhost:8080`, so open `http://localhost:5173` while developing.
+
+## Automated tests
+
+```sh
+cargo test                     # Rust unit and integration tests
+cd frontend && npm test        # frontend unit and integration tests (Vitest)
+```
+
+No printer, Docker or network setup is needed. The Rust tests run against a
+fake IPP printer (`tests/support/mod.rs`) and generate their PDFs on the fly;
+`cargo build` downloads PDFium for them, as for inkdrop itself.
+
+- **Unit tests** sit beside the code: `#[cfg(test)]` modules in `src/*.rs`,
+  and `frontend/src/*.test.ts`.
+- **Integration tests** are in `tests/` and `frontend/tests/integration/`.
+  `tests/server.rs` and `tests/print_cli.rs` run the real `inkdrop` and
+  `inkdrop-print` binaries against fake printers. `tests/mdns_discovery.rs`
+  advertises fake printers over real mDNS, so it needs a network interface
+  with multicast (loopback alone won't do). The frontend integration test
+  loads `index.html` and `main.ts` against a fake backend.
+
+To measure coverage (CI fails below 95%):
+
+```sh
+cargo llvm-cov                 # needs cargo-llvm-cov; add --html for a report
+cd frontend && npm run coverage
+```

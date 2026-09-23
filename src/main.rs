@@ -1,21 +1,12 @@
-mod http;
-
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use axum::extract::DefaultBodyLimit;
-use axum::routing::{get, post};
-use axum::Router;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
+use inkdrop::server::{self, AppState};
 use inkdrop::{discovery, pdf};
-
-use crate::http::AppState;
-
-const MAX_UPLOAD_BYTES: usize = 200 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() {
@@ -32,38 +23,42 @@ async fn main() {
     discovery::spawn(registry.clone());
 
     // Printers to list without mDNS discovery, e.g. the Docker simulator.
-    let configured: Vec<String> = std::env::var("INKDROP_PRINTERS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|uri| !uri.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let configured = server::configured_printers(&std::env::var("INKDROP_PRINTERS").unwrap_or_default());
     discovery::spawn_configured(configured, registry.clone());
 
-    let state = AppState { registry };
-
-    let serve_frontend = ServeDir::new("frontend/dist");
-
-    let app = Router::new()
-        .route("/api/printers", get(http::printers_stream))
-        .route(
-            "/api/print/{id}",
-            post(http::print_handler).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .with_state(state)
-        .fallback_service(serve_frontend);
+    let app = server::router(AppState { registry }, "frontend/dist");
 
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-
-    let listener = TcpListener::bind(addr).await.expect("failed to bind listener");
+    let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port)))
+        .await
+        .expect("failed to bind listener");
+    // The bound address, so `PORT=0` reports the port the OS chose.
+    let addr = listener.local_addr().expect("listener has a local address");
     tracing::info!(%addr, "inkdrop listening");
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .expect("server error");
+    let server = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>());
+    // Exit promptly rather than draining connections: browsers hold the
+    // printer event stream open indefinitely.
+    tokio::select! {
+        result = server => result.expect("server error"),
+        () = shutdown_signal() => tracing::info!("inkdrop stopping"),
+    }
+}
+
+/// Ctrl-C, or SIGTERM (e.g. `docker stop`) on Unix.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to listen for SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
