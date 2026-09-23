@@ -1,8 +1,4 @@
-mod discovery;
 mod http;
-mod pdf;
-mod printing;
-mod raster;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -14,6 +10,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
+
+use inkdrop::{discovery, pdf};
 
 use crate::http::AppState;
 

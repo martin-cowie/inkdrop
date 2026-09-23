@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::*;
@@ -48,9 +47,8 @@ fn pdfium_library_path() -> std::path::PathBuf {
 }
 
 /// Render every page of `pdf_bytes` to an RGB8 bitmap at `dpi` dots per inch.
-/// `job_title` and `client_ip` are only used to correlate the page-by-page
-/// progress log lines with the request that triggered them.
-pub fn render_pages(pdf_bytes: &[u8], dpi: f32, job_title: &str, client_ip: IpAddr) -> Result<Vec<RenderedPage>, RenderError> {
+/// Progress is logged per page; the caller's tracing span identifies the job.
+pub fn render_pages(pdf_bytes: &[u8], dpi: f32) -> Result<Vec<RenderedPage>, RenderError> {
     let document = pdfium().load_pdf_from_byte_slice(pdf_bytes, None)?;
     let total_pages = document.pages().len();
 
@@ -65,8 +63,6 @@ pub fn render_pages(pdf_bytes: &[u8], dpi: f32, job_title: &str, client_ip: IpAd
             let height_px = ((height_pts / 72.0) * dpi).round().max(1.0) as i32;
 
             info!(
-                %client_ip,
-                %job_title,
                 page = index + 1,
                 total_pages,
                 width_px,

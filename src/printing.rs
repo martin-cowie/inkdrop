@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use bytes::Bytes;
 use ipp::parser::IppParseError;
 use ipp::prelude::*;
-use tracing::info;
+use tracing::{debug, info, info_span, trace, warn, Instrument};
 
 use crate::discovery::Printer;
 use crate::raster::ColorMode;
@@ -21,10 +21,33 @@ pub enum PrintError {
     IppBuild(#[from] IppParseError),
     #[error("PDF rendering failed: {0}")]
     Render(#[from] crate::pdf::RenderError),
+    #[error("printer rejected the request: {status:?}{}", status_detail(.message))]
+    Rejected { status: StatusCode, message: Option<String> },
+}
+
+fn status_detail(message: &Option<String>) -> String {
+    message.as_deref().map(|m| format!(" ({m})")).unwrap_or_default()
+}
+
+/// A document format inkdrop can send to a printer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentFormat {
+    Pdf,
+    PwgRaster,
+}
+
+impl DocumentFormat {
+    pub fn mime_type(self) -> &'static str {
+        match self {
+            DocumentFormat::Pdf => "application/pdf",
+            DocumentFormat::PwgRaster => "image/pwg-raster",
+        }
+    }
 }
 
 /// How a PDF will actually reach the printer.
-enum PrintPlan {
+#[derive(Debug)]
+pub enum PrintPlan {
     /// The printer accepts `application/pdf` directly; send the bytes as-is.
     DirectPdf,
     /// The printer doesn't take PDF, but does take `image/pwg-raster`; the
@@ -32,41 +55,91 @@ enum PrintPlan {
     PwgRaster { dpi: u32, color: ColorMode },
 }
 
+/// What the printer said in response to a successful Print-Job.
+#[derive(Debug)]
+pub struct Submitted {
+    pub status: StatusCode,
+    pub job_id: Option<i32>,
+    pub job_state: Option<String>,
+    pub job_state_reasons: Vec<String>,
+}
+
 /// Confirm how the printer wants the document, converting if necessary, then
 /// submit it as a Print-Job.
 pub async fn print_pdf(printer: &Printer, job_title: &str, client_ip: IpAddr, document: Bytes) -> Result<(), PrintError> {
-    let uri: Uri = printer.ipp_uri().parse()?;
-    let client = AsyncIppClient::new(uri.clone());
+    let span = info_span!("print", %client_ip, %job_title);
+    async {
+        let uri: Uri = printer.ipp_uri().parse()?;
+        let client = AsyncIppClient::new(uri.clone());
 
-    let plan = plan_print(&client, uri.clone()).await?;
+        let plan = plan_print(&client, uri.clone(), None).await?;
+        let (payload, format) = render(&plan, document)?;
+        submit(&client, uri, payload, format, job_title).await?;
 
-    let (payload, document_format) = match plan {
+        info!("print job accepted by printer");
+        Ok(())
+    }
+    .instrument(span)
+    .await
+}
+
+/// Convert `document` into the form `plan` calls for, returning the bytes to
+/// send and their format.
+pub fn render(plan: &PrintPlan, document: Bytes) -> Result<(Bytes, DocumentFormat), PrintError> {
+    match *plan {
         PrintPlan::DirectPdf => {
-            info!(%client_ip, %job_title, "printer accepts PDF directly; sending document as-is");
-            (IppPayload::new(Cursor::new(document)), "application/pdf")
+            info!("printer accepts PDF directly; sending document as-is");
+            Ok((document, DocumentFormat::Pdf))
         }
         PrintPlan::PwgRaster { dpi, color } => {
-            info!(%client_ip, %job_title, dpi, ?color, "printer requires PWG-Raster; rendering PDF page by page");
-            let pages = crate::pdf::render_pages(&document, dpi as f32, job_title, client_ip)?;
+            info!(dpi, ?color, "printer requires PWG-Raster; rendering PDF page by page");
+            let pages = crate::pdf::render_pages(&document, dpi as f32)?;
             let raster = crate::raster::encode(&pages, dpi, color);
-            info!(%client_ip, %job_title, page_count = pages.len(), "encoded raster document");
-            (IppPayload::new(Cursor::new(raster)), "image/pwg-raster")
+            info!(page_count = pages.len(), bytes = raster.len(), "encoded raster document");
+            Ok((raster, DocumentFormat::PwgRaster))
         }
-    };
+    }
+}
 
-    let operation = IppOperationBuilder::print_job(uri, payload)
+/// Send `payload` to the printer as a single Print-Job request.
+pub async fn submit(
+    client: &AsyncIppClient,
+    uri: Uri,
+    payload: Bytes,
+    format: DocumentFormat,
+    job_title: &str,
+) -> Result<Submitted, PrintError> {
+    let operation = IppOperationBuilder::print_job(uri, IppPayload::new(Cursor::new(payload)))
         .user_name("inkdrop")
         .job_title(job_title)
-        .document_format(document_format)
+        .document_format(format.mime_type())
         .build()?;
 
-    let response = client.send(operation).await?;
-    if !response.header().status_code().is_success() {
-        return Err(PrintError::Ipp(IppError::StatusError(response.header().status_code())));
+    let request: IppRequestResponse = operation.into();
+    log_attributes("Print-Job request", request.attributes());
+
+    let response = client.send(request).await?;
+    let status = response.header().status_code();
+    log_attributes("Print-Job response", response.attributes());
+
+    if !status.is_success() {
+        return Err(PrintError::Rejected { status, message: status_message(&response) });
     }
 
-    info!(%client_ip, %job_title, "print job accepted by printer");
-    Ok(())
+    let job = response.attributes().first_of(DelimiterTag::JobAttributes);
+    let job_attr = |name: &str| job.and_then(|g| g.get(name)).map(|attr| attr.value());
+
+    Ok(Submitted {
+        status,
+        job_id: job_attr("job-id").and_then(|v| v.as_integer().copied()),
+        job_state: job_attr("job-state").map(|v| match v {
+            IppValue::Enum(n) => JobState::try_from(*n).map(|s| format!("{s:?}")).unwrap_or_else(|_| n.to_string()),
+            other => other.to_string(),
+        }),
+        job_state_reasons: job_attr("job-state-reasons")
+            .map(|v| flatten(v).iter().map(|r| r.to_string()).collect())
+            .unwrap_or_default(),
+    })
 }
 
 /// Query the printer directly for the raster formats it advertises, for use
@@ -101,7 +174,10 @@ async fn document_formats(client: &AsyncIppClient, uri: Uri) -> Result<Vec<Strin
     Ok(formats)
 }
 
-async fn plan_print(client: &AsyncIppClient, uri: Uri) -> Result<PrintPlan, PrintError> {
+/// Ask the printer what it accepts and decide how to send it a PDF. With
+/// `forced`, that format is used even if the printer doesn't advertise it,
+/// though raster resolution and color mode still come from the printer.
+pub async fn plan_print(client: &AsyncIppClient, uri: Uri, forced: Option<DocumentFormat>) -> Result<PrintPlan, PrintError> {
     let operation = IppOperationBuilder::get_printer_attributes(uri)
         .attribute(IppAttribute::DOCUMENT_FORMAT_SUPPORTED)
         .attribute("pwg-raster-document-resolution-supported")
@@ -109,20 +185,35 @@ async fn plan_print(client: &AsyncIppClient, uri: Uri) -> Result<PrintPlan, Prin
         .build()?;
 
     let response = client.send(operation).await?;
-    let group = response.attributes().first_of(DelimiterTag::PrinterAttributes);
+    let status = response.header().status_code();
+    log_attributes("Get-Printer-Attributes response", response.attributes());
 
-    let format_supported = |format: &str| {
-        group
-            .and_then(|g| g.get(IppAttribute::DOCUMENT_FORMAT_SUPPORTED))
-            .is_some_and(|attr| flatten(attr.value()).iter().any(|v| value_is(v, format)))
-    };
-
-    if format_supported("application/pdf") {
-        return Ok(PrintPlan::DirectPdf);
+    if !status.is_success() {
+        return Err(PrintError::Rejected { status, message: status_message(&response) });
     }
 
-    if !format_supported("image/pwg-raster") {
-        return Err(PrintError::UnsupportedFormat);
+    let group = response.attributes().first_of(DelimiterTag::PrinterAttributes);
+
+    let format_supported = |format: DocumentFormat| {
+        group
+            .and_then(|g| g.get(IppAttribute::DOCUMENT_FORMAT_SUPPORTED))
+            .is_some_and(|attr| flatten(attr.value()).iter().any(|v| value_is(v, format.mime_type())))
+    };
+
+    let format = match forced {
+        Some(format) => {
+            if !format_supported(format) {
+                warn!(format = format.mime_type(), "printer does not advertise the forced document format");
+            }
+            format
+        }
+        None if format_supported(DocumentFormat::Pdf) => DocumentFormat::Pdf,
+        None if format_supported(DocumentFormat::PwgRaster) => DocumentFormat::PwgRaster,
+        None => return Err(PrintError::UnsupportedFormat),
+    };
+
+    if format == DocumentFormat::Pdf {
+        return Ok(PrintPlan::DirectPdf);
     }
 
     let dpi = group
@@ -137,6 +228,29 @@ async fn plan_print(client: &AsyncIppClient, uri: Uri) -> Result<PrintPlan, Prin
         .unwrap_or(ColorMode::Sgray8);
 
     Ok(PrintPlan::PwgRaster { dpi, color })
+}
+
+fn status_message(response: &IppRequestResponse) -> Option<String> {
+    response
+        .attributes()
+        .first_of(DelimiterTag::OperationAttributes)
+        .and_then(|g| g.get("status-message"))
+        .map(|attr| attr.value().to_string())
+}
+
+/// Log every attribute of an IPP message: operation attributes at debug
+/// level, everything else (often hundreds of printer attributes) at trace.
+fn log_attributes(context: &str, attributes: &IppAttributes) {
+    for group in attributes.groups() {
+        let tag = group.tag();
+        for attr in group.attributes() {
+            if tag == DelimiterTag::OperationAttributes || tag == DelimiterTag::JobAttributes {
+                debug!(?tag, name = %attr.name(), value = %attr.value(), "{context}");
+            } else {
+                trace!(?tag, name = %attr.name(), value = %attr.value(), "{context}");
+            }
+        }
+    }
 }
 
 /// Attribute values are either a single `IppValue` or an `Array` of them;

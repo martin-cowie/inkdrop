@@ -10,8 +10,8 @@ use serde::Serialize;
 use tokio_stream::wrappers::WatchStream;
 use tracing::{error, info};
 
-use crate::discovery::{Printer, Registry};
-use crate::printing::{self, PrintError};
+use inkdrop::discovery::{Printer, Registry};
+use inkdrop::printing::{self, PrintError};
 
 #[derive(Clone)]
 pub struct AppState {

@@ -91,9 +91,55 @@ answering pings entirely) if hit with several large print jobs in quick
 succession — if that happens, give it a minute, or power-cycle it.
 
 **Don't have a spare printer, or don't want to burn paper and ink on every
-test?** See [simulator/](simulator/) — a fake IPP printer that advertises
-itself over mDNS just like a real one, and turns PWG-Raster print jobs back
-into viewable PNGs instead of physical pages.
+test?** See [Testing the print path](#testing-the-print-path) below.
+
+## Testing the print path
+
+`inkdrop-print` is a second binary that runs just the "print this PDF to that
+printer" step — the same conversion and IPP submission code the server uses,
+without the web UI or mDNS discovery:
+
+```sh
+PDFIUM_DYNAMIC_LIB_PATH=/path/to/lib cargo run --bin inkdrop-print -- document.pdf ipp://192.168.1.20:631/ipp/print
+```
+
+It asks the printer what it accepts, converts the PDF if needed (e.g. to
+PWG-Raster), submits a Print-Job, and reports the job id and state — or the
+printer's status code and `status-message` if it rejects the job. Options:
+
+- `--format auto|pdf|pwg-raster` — `auto` (the default) behaves like the
+  server, preferring PDF. The others force that format even if the printer
+  doesn't advertise it, which is how to exercise raster conversion against a
+  printer that also takes PDF.
+- `--title <name>` — job title (defaults to the file name).
+- `-v` — debug logs: the print plan, each raster page header, and the IPP
+  operation and job attributes sent and received. `-vv` also dumps every
+  printer attribute.
+
+### Simulated printer
+
+For a printer that doesn't use paper, run
+[ippsample](https://github.com/istopwg/ippsample)'s `ippserver` in Docker:
+
+```sh
+./scripts/sim-start.sh     # ipp://localhost:1631/ipp/print
+./scripts/sim-stop.sh
+```
+
+Set `SIM_PORT` to publish it on a different host port. It doesn't advertise
+over mDNS (Docker Desktop can't pass multicast through anyway), so it won't
+appear in the web UI — address it with `inkdrop-print`. It accepts
+`application/pdf`, `image/jpeg` and `image/pwg-raster`, so use
+`--format pwg-raster` to test conversion. Received jobs are saved in
+`.docker/dev/ipp-server/spool/ipp-dev/`. `ippserver` spools whatever it is
+sent without checking it, so check a raster job against the PWG spec with
+`ippdoclint`:
+
+```sh
+docker compose exec ipp-server ippdoclint -v -i image/pwg-raster /spool/ipp-dev/<job-file>.ras
+```
+
+Server logs: `docker compose logs -f ipp-server`.
 
 ## Troubleshooting
 

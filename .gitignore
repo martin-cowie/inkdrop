@@ -1,3 +1,4 @@
 /target
 /native
 .DS_Store
+/.docker

@@ -1,0 +1,12 @@
+# Simulated IPP Everywhere printer for testing inkdrop's print path.
+# Started and stopped by scripts/sim-start.sh and scripts/sim-stop.sh.
+services:
+  ipp-server:
+    image: dragosprotung/ippsample:94d1b3e
+    platform: linux/amd64
+    command: ippserver -p 1631 -r _print --no-dns-sd -vvv -d /spool "ipp-dev"
+    volumes:
+      - ./.docker/dev/ipp-server/config:/config
+      - ./.docker/dev/ipp-server/spool:/spool
+    ports:
+      - "${SIM_PORT:-1631}:1631"
