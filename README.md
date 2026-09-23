@@ -62,7 +62,18 @@ PDFIUM_DYNAMIC_LIB_PATH=/path/to/lib cargo run
 ```
 
 The server listens on `http://localhost:8080` by default. Open that in a
-browser. Set `PORT=<n>` to use a different port. Use `cargo run --release`
+browser. Set `PORT=<n>` to use a different port.
+
+To list printers that mDNS can't find — such as the [simulated
+printer](#simulated-printer) — set `INKDROP_PRINTERS` to a comma-separated list
+of their `ipp://` URIs:
+
+```sh
+INKDROP_PRINTERS=ipp://localhost:1631/ipp/print PDFIUM_DYNAMIC_LIB_PATH=/path/to/lib cargo run
+```
+
+Each is checked over IPP every 10 seconds and shown while it answers and
+handles URF or PWG-Raster, so it can be started after inkdrop. Use `cargo run --release`
 for an optimized build.
 
 ## Testing it
@@ -127,8 +138,9 @@ For a printer that doesn't use paper, run
 ```
 
 Set `SIM_PORT` to publish it on a different host port. It doesn't advertise
-over mDNS (Docker Desktop can't pass multicast through anyway), so it won't
-appear in the web UI — address it with `inkdrop-print`. It accepts
+over mDNS (Docker Desktop can't pass multicast through anyway), so to see it
+in the web UI, name it in `INKDROP_PRINTERS` (see below); `inkdrop-print` can
+address it directly. It accepts
 `application/pdf`, `image/jpeg` and `image/pwg-raster`, so use
 `--format pwg-raster` to test conversion. Received jobs are saved in
 `.docker/dev/ipp-server/spool/ipp-dev/`. `ippserver` spools whatever it is

@@ -31,6 +31,16 @@ async fn main() {
     let (registry, _) = watch::channel(HashMap::new());
     discovery::spawn(registry.clone());
 
+    // Printers to list without mDNS discovery, e.g. the Docker simulator.
+    let configured: Vec<String> = std::env::var("INKDROP_PRINTERS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|uri| !uri.is_empty())
+        .map(str::to_owned)
+        .collect();
+    discovery::spawn_configured(configured, registry.clone());
+
     let state = AppState { registry };
 
     let serve_frontend = ServeDir::new("frontend/dist");

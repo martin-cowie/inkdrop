@@ -142,14 +142,24 @@ pub async fn submit(
     })
 }
 
+/// What a printer says about itself when asked directly over IPP.
+#[derive(Debug)]
+pub struct PrinterInfo {
+    /// `printer-info`, falling back to `printer-name`.
+    pub name: Option<String>,
+    pub model: Option<String>,
+    /// Display labels of the raster formats it accepts (see
+    /// [`crate::raster::matching_labels`]).
+    pub formats: Vec<&'static str>,
+}
+
 /// Query the printer directly for the raster formats it advertises, for use
 /// when mDNS TXT records don't mention "pdl" at all. Any failure
 /// (unreachable, malformed response, etc.) is treated as "none" rather than
 /// propagated, since this is a best-effort discovery-time probe.
 pub async fn probe_raster_formats(uri: &Uri) -> Vec<&'static str> {
-    let client = AsyncIppClient::new(uri.clone());
-    match document_formats(&client, uri.clone()).await {
-        Ok(formats) => crate::raster::matching_labels(formats.iter().map(String::as_str)),
+    match probe_printer(uri).await {
+        Ok(info) => info.formats,
         Err(err) => {
             tracing::debug!(%uri, error = %err, "failed to probe printer capabilities");
             Vec::new()
@@ -157,21 +167,39 @@ pub async fn probe_raster_formats(uri: &Uri) -> Vec<&'static str> {
     }
 }
 
-async fn document_formats(client: &AsyncIppClient, uri: Uri) -> Result<Vec<String>, PrintError> {
-    let operation = IppOperationBuilder::get_printer_attributes(uri)
+/// Ask the printer for its name, model and supported document formats.
+pub async fn probe_printer(uri: &Uri) -> Result<PrinterInfo, PrintError> {
+    let client = AsyncIppClient::new(uri.clone());
+    let operation = IppOperationBuilder::get_printer_attributes(uri.clone())
         .attribute(IppAttribute::DOCUMENT_FORMAT_SUPPORTED)
+        .attribute(IppAttribute::PRINTER_NAME)
+        .attribute("printer-info")
+        .attribute("printer-make-and-model")
         .build()?;
 
     let response = client.send(operation).await?;
+    let status = response.header().status_code();
+    if !status.is_success() {
+        return Err(PrintError::Rejected { status, message: status_message(&response) });
+    }
 
-    let formats = response
-        .attributes()
-        .first_of(DelimiterTag::PrinterAttributes)
+    let group = response.attributes().first_of(DelimiterTag::PrinterAttributes);
+    let text = |name: &str| {
+        group
+            .and_then(|g| g.get(name))
+            .map(|attr| attr.value().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let formats: Vec<String> = group
         .and_then(|g| g.get(IppAttribute::DOCUMENT_FORMAT_SUPPORTED))
         .map(|attr| flatten(attr.value()).iter().map(|v| v.to_string()).collect())
         .unwrap_or_default();
 
-    Ok(formats)
+    Ok(PrinterInfo {
+        name: text("printer-info").or_else(|| text(IppAttribute::PRINTER_NAME)),
+        model: text("printer-make-and-model"),
+        formats: crate::raster::matching_labels(formats.iter().map(String::as_str)),
+    })
 }
 
 /// Ask the printer what it accepts and decide how to send it a PDF. With

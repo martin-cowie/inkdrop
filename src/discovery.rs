@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use http::Uri;
 use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-/// A printer discovered via mDNS that handles URF or PWG-Raster.
+/// A printer, discovered via mDNS or configured by URI, that handles URF or
+/// PWG-Raster.
 #[derive(Clone, Debug)]
 pub struct Printer {
     pub id: String,
@@ -77,6 +80,83 @@ pub fn spawn(registry: Registry) {
             }
         });
     }
+}
+
+/// How often a configured printer is re-probed, so that it appears and
+/// disappears as it starts and stops, like an mDNS-advertised one.
+const CONFIGURED_PROBE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Add printers given by URI (e.g. `ipp://localhost:1631/ipp/print`) to
+/// `registry`, bypassing mDNS. Each is probed over IPP periodically, and is
+/// listed only while it answers and handles URF or PWG-Raster.
+pub fn spawn_configured(uris: Vec<String>, registry: Registry) {
+    for uri in uris {
+        let registry = registry.clone();
+        tokio::spawn(async move { watch_configured(uri, registry).await });
+    }
+}
+
+async fn watch_configured(uri: String, registry: Registry) {
+    let parsed = match uri.parse::<Uri>() {
+        Ok(parsed) if parsed.scheme_str() == Some("ipp") && parsed.host().is_some() => parsed,
+        _ => {
+            warn!(%uri, "ignoring configured printer: expected a URI like ipp://host:631/ipp/print");
+            return;
+        }
+    };
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    uri.hash(&mut hasher);
+    let id = format!("configured-{:016x}", hasher.finish());
+
+    let mut interval = tokio::time::interval(CONFIGURED_PROBE_INTERVAL);
+    let mut last_problem: Option<String> = None;
+    loop {
+        interval.tick().await;
+        match configured_printer(&parsed, id.clone()).await {
+            Ok(printer) => {
+                if last_problem.is_some() || !registry.borrow().contains_key(&id) {
+                    info!(name = %printer.name, uri = %printer.ipp_uri(), formats = ?printer.formats, "added configured printer");
+                }
+                last_problem = None;
+                apply_best(id.clone(), Some(printer), &registry);
+            }
+            Err(problem) => {
+                if last_problem.as_ref() != Some(&problem) {
+                    warn!(%uri, %problem, "configured printer unavailable; will keep retrying");
+                }
+                last_problem = Some(problem);
+                apply_best(id.clone(), None, &registry);
+            }
+        }
+    }
+}
+
+async fn configured_printer(uri: &Uri, id: String) -> Result<Printer, String> {
+    let host = uri.host().unwrap_or_default().trim_matches(['[', ']']);
+    let port = uri.port_u16().unwrap_or(631);
+
+    let ip = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|err| format!("cannot resolve {host}: {err}"))?
+        .map(|addr| addr.ip())
+        .min_by_key(|ip| !ip.is_ipv4())
+        .ok_or_else(|| format!("no addresses for {host}"))?;
+
+    let info = crate::printing::probe_printer(uri).await.map_err(|err| err.to_string())?;
+    if info.formats.is_empty() {
+        return Err("printer does not handle URF or PWG-Raster".to_owned());
+    }
+
+    Ok(Printer {
+        id,
+        name: info.name.unwrap_or_else(|| host.to_owned()),
+        ip,
+        port,
+        resource_path: uri.path().to_owned(),
+        model: info.model,
+        formats: info.formats,
+    })
 }
 
 async fn browse(service_type: &'static str, registry: Registry, merge_state: MergeState) -> Result<(), mdns_sd::Error> {
