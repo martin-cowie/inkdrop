@@ -21,24 +21,24 @@ PWG-Raster instead.
 ### Getting PDFium
 
 inkdrop renders PDF pages itself (via `pdfium-render`) rather than shelling
-out, which means a prebuilt PDFium shared library must be present at
-runtime — it is **not** downloaded automatically and is **not** bundled in
-this repo (it's a large, platform-specific binary).
+out, which needs a prebuilt PDFium shared library. `cargo build` fetches it
+automatically: `build.rs` downloads the build for the target platform from
+[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries/releases)
+(pinned by `PDFIUM_BUILD` in `build.rs`) into `native/pdfium/<platform>/`,
+which is git-ignored. This uses the `curl` and `tar` commands, and only
+happens when that directory doesn't already hold the pinned version.
 
-1. Download the build for your platform from
-   [bblanchon/pdfium-binaries releases](https://github.com/bblanchon/pdfium-binaries/releases)
-   — e.g. `pdfium-linux-x64.tgz` for a typical Linux server, or
-   `pdfium-mac-arm64.tgz` for Apple Silicon Macs.
-2. Extract it and note the path to the `lib/` directory inside (it contains
-   `libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`).
-3. Point inkdrop at it with an environment variable when running:
+The compiled binary loads the library from that directory, so `cargo run`
+works from anywhere. To use a different copy — for example when deploying
+the binary to another machine — point inkdrop at the directory containing
+`libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`:
 
-   ```sh
-   export PDFIUM_DYNAMIC_LIB_PATH=/path/to/extracted/lib
-   ```
+```sh
+export PDFIUM_DYNAMIC_LIB_PATH=/path/to/extracted/lib
+```
 
-   If unset, inkdrop looks for it at `native/pdfium/lib` relative to the
-   working directory — convenient for local dev if you extract it there.
+Setting this variable at build time also skips the download. If neither
+location has the library, inkdrop falls back to a system-wide PDFium install.
 
 ## Build
 
@@ -58,7 +58,7 @@ You need to rebuild the frontend (`npm run build`) after any change to
 ## Run
 
 ```sh
-PDFIUM_DYNAMIC_LIB_PATH=/path/to/lib cargo run
+cargo run
 ```
 
 The server listens on `http://localhost:8080` by default. Open that in a
@@ -69,7 +69,7 @@ printer](#simulated-printer) — set `INKDROP_PRINTERS` to a comma-separated lis
 of their `ipp://` URIs:
 
 ```sh
-INKDROP_PRINTERS=ipp://localhost:1631/ipp/print PDFIUM_DYNAMIC_LIB_PATH=/path/to/lib cargo run
+INKDROP_PRINTERS=ipp://localhost:1631/ipp/print cargo run
 ```
 
 Each is checked over IPP every 10 seconds and shown while it answers and
@@ -117,7 +117,7 @@ printer" step — the same conversion and IPP submission code the server uses,
 without the web UI or mDNS discovery:
 
 ```sh
-PDFIUM_DYNAMIC_LIB_PATH=/path/to/lib cargo run --bin inkdrop-print -- document.pdf ipp://192.168.1.20:631/ipp/print
+cargo run --bin inkdrop-print -- document.pdf ipp://192.168.1.20:631/ipp/print
 ```
 
 It asks the printer what it accepts, converts the PDF if needed (e.g. to
@@ -174,9 +174,10 @@ Server logs: `docker compose logs -f ipp-server`.
   refused rather than sending a doomed job. It also fails clearly if a
   printer only advertises URF (no PWG-Raster encoder is implemented yet —
   only PWG-Raster conversion and direct PDF pass-through are supported).
-- **"failed to load the PDFium library" panic on startup**: `PDFIUM_DYNAMIC_LIB_PATH`
-  isn't set (or doesn't point at the right directory) and no system-wide
-  PDFium install was found either. See "Getting PDFium" above.
+- **"PDFium is unavailable" on startup**: the library isn't in the directory
+  `cargo build` downloaded it to (or `PDFIUM_DYNAMIC_LIB_PATH` doesn't point
+  at the right directory) and no system-wide PDFium install was found either.
+  See "Getting PDFium" above.
 - **Frontend changes don't show up**: You must re-run `npm run build` inside
   `frontend/` — the Rust server only serves the built `frontend/dist`
   output, it doesn't rebuild it for you.
@@ -187,7 +188,7 @@ For frontend iteration with hot reload, run the backend and the Vite dev
 server side by side:
 
 ```sh
-PDFIUM_DYNAMIC_LIB_PATH=/path/to/lib cargo run   # terminal 1, backend on :8080
+cargo run                                         # terminal 1, backend on :8080
 cd frontend && npm run dev                        # terminal 2, Vite dev server on :5173
 ```
 

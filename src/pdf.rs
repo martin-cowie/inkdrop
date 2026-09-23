@@ -28,7 +28,10 @@ fn pdfium() -> &'static Pdfium {
 }
 
 fn bind_pdfium() -> Result<Pdfium, PdfiumError> {
-    let bindings = Pdfium::bind_to_library(pdfium_library_path()).or_else(|_| Pdfium::bind_to_system_library())?;
+    let bindings = match pdfium_library_path() {
+        Some(path) => Pdfium::bind_to_library(path).or_else(|_| Pdfium::bind_to_system_library())?,
+        None => Pdfium::bind_to_system_library()?,
+    };
     Ok(Pdfium::new(bindings))
 }
 
@@ -41,9 +44,10 @@ pub fn ensure_available() -> Result<(), PdfiumError> {
     Ok(())
 }
 
-fn pdfium_library_path() -> std::path::PathBuf {
-    let dir = std::env::var("PDFIUM_DYNAMIC_LIB_PATH").unwrap_or_else(|_| "native/pdfium/lib".to_owned());
-    Pdfium::pdfium_platform_library_name_at_path(&dir)
+/// `PDFIUM_DYNAMIC_LIB_PATH` if set, otherwise the copy `build.rs` downloaded.
+fn pdfium_library_path() -> Option<std::path::PathBuf> {
+    let dir = std::env::var("PDFIUM_DYNAMIC_LIB_PATH").ok().or_else(|| option_env!("INKDROP_PDFIUM_LIB_DIR").map(str::to_owned))?;
+    Some(Pdfium::pdfium_platform_library_name_at_path(&dir))
 }
 
 /// Render every page of `pdf_bytes` to an RGB8 bitmap at `dpi` dots per inch.
