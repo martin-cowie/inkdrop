@@ -26,7 +26,7 @@ uuid = { version = "1.26.1", features = ["v4"] }
 # Release builds favour a small executable. Panics still unwind (no
 # `panic = "abort"`), so a panic in one request or task doesn't kill the server.
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
