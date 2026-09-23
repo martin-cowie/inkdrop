@@ -22,3 +22,11 @@ tower-http = { version = "0.7.1", features = ["fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.26.1", features = ["v4"] }
+
+# Release builds favour a small executable. Panics still unwind (no
+# `panic = "abort"`), so a panic in one request or task doesn't kill the server.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true

@@ -73,8 +73,14 @@ INKDROP_PRINTERS=ipp://localhost:1631/ipp/print PDFIUM_DYNAMIC_LIB_PATH=/path/to
 ```
 
 Each is checked over IPP every 10 seconds and shown while it answers and
-handles a supported format, so it can be started after inkdrop. Use `cargo run --release`
-for an optimized build.
+handles a supported format, so it can be started after inkdrop.
+
+For a release build, use `cargo build --release` (or `cargo run --release`).
+The release profile in `Cargo.toml` favours a small executable, with
+link-time optimisation (LTO), size optimisation (`opt-level = "z"`), and
+stripped symbols. The binaries are about 3–4 MB instead of 10–12 MB.
+PWG-Raster conversion is about half as fast as with the default release
+settings, which is still faster than a printer prints.
 
 ## Testing it
 
