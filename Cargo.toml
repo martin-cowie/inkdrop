@@ -2,6 +2,7 @@
 name = "inkdrop"
 version = "0.1.0"
 edition = "2024"
+default-run = "inkdrop"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["multipart"] }
