@@ -81,8 +81,8 @@ for an optimized build.
 1. Open `http://localhost:8080` in a browser on the same network as a
    qualifying printer.
 2. Within a few seconds you should see a 🖨️ tile per printer found, showing
-   its name, network address, model (if advertised), and which format(s) it
-   supports (URF / PWG-Raster badges). If none appear, you'll see a 🤔 with
+   its name, IPP URL, model (if advertised), and which format(s) it
+   supports. If none appear, you'll see a 🤔 with
    an explanation — check the troubleshooting section below.
 3. Drag a `.pdf` file from your file manager over a printer tile. The cursor
    should indicate it's droppable, and the tile highlights. Dropping a

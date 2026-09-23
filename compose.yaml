@@ -4,7 +4,7 @@ services:
   ipp-server:
     image: dragosprotung/ippsample:94d1b3e
     platform: linux/amd64
-    command: ippserver -p 1631 -r _print --no-dns-sd -vvv -d /spool "ipp-dev"
+    command: ippserver -p 1631 -r _print --no-dns-sd -vvv -d /spool "ipp-sim"
     volumes:
       - ./.docker/dev/ipp-server/config:/config
       - ./.docker/dev/ipp-server/spool:/spool

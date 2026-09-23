@@ -22,7 +22,7 @@ pub struct AppState {
 struct PrinterView {
     id: String,
     name: String,
-    address: String,
+    uri: String,
     model: Option<String>,
     formats: Vec<&'static str>,
 }
@@ -33,7 +33,7 @@ fn to_views(printers: &HashMap<String, Printer>) -> Vec<PrinterView> {
         .map(|p| PrinterView {
             id: p.id.clone(),
             name: p.name.clone(),
-            address: p.address(),
+            uri: p.uri.to_string(),
             model: p.model.clone(),
             formats: p.formats.clone(),
         })

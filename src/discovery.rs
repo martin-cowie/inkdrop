@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,31 +15,14 @@ use tracing::{debug, info, warn};
 pub struct Printer {
     pub id: String,
     pub name: String,
-    pub ip: IpAddr,
-    pub port: u16,
-    /// The IPP resource path, e.g. "ipp/print" (from the TXT "rp" key).
-    pub resource_path: String,
+    /// Where to send IPP requests, e.g. `ipp://192.168.1.20:631/ipp/print`.
+    pub uri: Uri,
     /// Model string from the TXT "ty" key, e.g. "DeskJet 3630 series".
     pub model: Option<String>,
     /// Display labels of the formats this printer accepts, e.g.
     /// `["PDF", "URF", "PWG-Raster"]`. Always non-empty for a printer in the
     /// registry.
     pub formats: Vec<&'static str>,
-}
-
-impl Printer {
-    pub fn ipp_uri(&self) -> String {
-        format!(
-            "ipp://{}:{}/{}",
-            self.ip,
-            self.port,
-            self.resource_path.trim_start_matches('/')
-        )
-    }
-
-    pub fn address(&self) -> String {
-        format!("{}:{}", self.ip, self.port)
-    }
 }
 
 pub type Registry = watch::Sender<HashMap<String, Printer>>;
@@ -116,7 +99,7 @@ async fn watch_configured(uri: String, registry: Registry) {
         match configured_printer(&parsed, id.clone()).await {
             Ok(printer) => {
                 if last_problem.is_some() || !registry.borrow().contains_key(&id) {
-                    info!(name = %printer.name, uri = %printer.ipp_uri(), formats = ?printer.formats, "added configured printer");
+                    info!(name = %printer.name, uri = %printer.uri, formats = ?printer.formats, "added configured printer");
                 }
                 last_problem = None;
                 apply_best(id.clone(), Some(printer), &registry);
@@ -133,16 +116,6 @@ async fn watch_configured(uri: String, registry: Registry) {
 }
 
 async fn configured_printer(uri: &Uri, id: String) -> Result<Printer, String> {
-    let host = uri.host().unwrap_or_default().trim_matches(['[', ']']);
-    let port = uri.port_u16().unwrap_or(631);
-
-    let ip = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|err| format!("cannot resolve {host}: {err}"))?
-        .map(|addr| addr.ip())
-        .min_by_key(|ip| !ip.is_ipv4())
-        .ok_or_else(|| format!("no addresses for {host}"))?;
-
     let info = crate::printing::probe_printer(uri).await.map_err(|err| err.to_string())?;
     if info.formats.is_empty() {
         return Err("printer does not handle a supported format".to_owned());
@@ -150,10 +123,8 @@ async fn configured_printer(uri: &Uri, id: String) -> Result<Printer, String> {
 
     Ok(Printer {
         id,
-        name: info.name.unwrap_or_else(|| host.to_owned()),
-        ip,
-        port,
-        resource_path: uri.path().to_owned(),
+        name: info.name.unwrap_or_else(|| uri.host().unwrap_or_default().to_owned()),
+        uri: uri.clone(),
         model: info.model,
         formats: info.formats,
     })
@@ -219,7 +190,7 @@ fn handle_resolved(
             }
 
             let printer = build_printer(&info, id.clone(), formats)?;
-            info!(name = %printer.name, uri = %printer.ipp_uri(), formats = ?printer.formats, "discovered printer (via mDNS pdl)");
+            info!(name = %printer.name, uri = %printer.uri, formats = ?printer.formats, "discovered printer (via mDNS pdl)");
             upsert_transport(id.clone(), secure, printer, registry, merge_state);
         }
         // No "pdl" TXT key at all: some printers omit it even though they
@@ -229,10 +200,7 @@ fn handle_resolved(
             let registry = registry.clone();
             let merge_state = merge_state.clone();
             tokio::spawn(async move {
-                let Ok(uri) = printer.ipp_uri().parse() else {
-                    return;
-                };
-                let formats = crate::printing::probe_formats(&uri).await;
+                let formats = crate::printing::probe_formats(&printer.uri).await;
                 if formats.is_empty() {
                     debug!(name = %printer.name, "printer does not handle a supported format");
                     return;
@@ -240,7 +208,7 @@ fn handle_resolved(
 
                 let mut printer = printer;
                 printer.formats = formats;
-                info!(name = %printer.name, uri = %printer.ipp_uri(), formats = ?printer.formats, "discovered printer (via IPP probe)");
+                info!(name = %printer.name, uri = %printer.uri, formats = ?printer.formats, "discovered printer (via IPP probe)");
                 upsert_transport(printer.id.clone(), secure, printer, &registry, &merge_state);
             });
         }
@@ -302,11 +270,16 @@ fn build_printer(info: &ResolvedService, id: String, formats: Vec<&'static str>)
         .or_else(|| info.addresses.iter().next())?
         .to_ip_addr();
 
-    let resource_path = info
-        .txt_properties
-        .get_property_val_str("rp")
-        .unwrap_or("ipp/print")
-        .to_owned();
+    // The TXT "rp" key is the resource path without its leading slash.
+    let resource_path = info.txt_properties.get_property_val_str("rp").unwrap_or("ipp/print");
+
+    // SocketAddr brackets IPv6 addresses, as the URI authority requires.
+    let uri = Uri::builder()
+        .scheme("ipp")
+        .authority(SocketAddr::new(ip, info.port).to_string())
+        .path_and_query(format!("/{}", resource_path.trim_start_matches('/')))
+        .build()
+        .ok()?;
 
     let name = display_name(&info.fullname);
     let model = info.txt_properties.get_property_val_str("ty").map(str::to_owned);
@@ -314,9 +287,7 @@ fn build_printer(info: &ResolvedService, id: String, formats: Vec<&'static str>)
     Some(Printer {
         id,
         name,
-        ip,
-        port: info.port,
-        resource_path,
+        uri,
         model,
         formats,
     })

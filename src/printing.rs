@@ -69,7 +69,7 @@ pub struct Submitted {
 pub async fn print_pdf(printer: &Printer, job_title: &str, client_ip: IpAddr, document: Bytes) -> Result<(), PrintError> {
     let span = info_span!("print", %client_ip, %job_title);
     async {
-        let uri: Uri = printer.ipp_uri().parse()?;
+        let uri = printer.uri.clone();
         let client = AsyncIppClient::new(uri.clone());
 
         let plan = plan_print(&client, uri.clone(), None).await?;

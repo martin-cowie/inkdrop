@@ -149,10 +149,14 @@ h1 {
   pointer-events: none;
 }
 
-.printer-tile .address {
+.printer-tile .uri {
   font-size: 12px;
   font-family: ui-monospace, Consolas, monospace;
   color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   pointer-events: none;
 }
 

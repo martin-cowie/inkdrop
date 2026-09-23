@@ -3,7 +3,7 @@ import './style.css';
 interface Printer {
   id: string;
   name: string;
-  address: string;
+  uri: string;
   model: string | null;
   formats: string[];
 }
@@ -46,7 +46,7 @@ function render(printers: Printer[]): void {
              aria-label="Print to ${escapeHtml(p.name)}">
           <div class="emoji">🖨️</div>
           <div class="name">${escapeHtml(p.name)}</div>
-          <div class="address">${escapeHtml(p.address)}</div>
+          <div class="uri" title="${escapeHtml(p.uri)}">${escapeHtml(p.uri)}</div>
           <div class="meta">
             ${p.model ? `<span class="model">${escapeHtml(p.model)}</span>` : ''}
             ${p.formats.map((f) => `<span class="badge">${escapeHtml(f)}</span>`).join('')}
