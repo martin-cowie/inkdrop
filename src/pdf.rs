@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use pdfium_render::prelude::*;
 use tracing::info;
@@ -21,14 +21,16 @@ pub enum RenderError {
 
 static INSTANCE: OnceLock<Pdfium> = OnceLock::new();
 
-fn pdfium() -> &'static Pdfium {
-    INSTANCE.get_or_init(|| {
-        bind_pdfium().expect("PDFium was verified available at startup via ensure_available(); this should not fail")
-    })
-}
+/// PDFium can only be bound once per process, so concurrent first calls to
+/// `ensure_available` are serialised rather than racing to bind.
+static BINDING: Mutex<()> = Mutex::new(());
 
-fn bind_pdfium() -> Result<Pdfium, PdfiumError> {
-    bind_pdfium_at(pdfium_library_path())
+fn pdfium() -> &'static Pdfium {
+    if let Some(instance) = INSTANCE.get() {
+        return instance;
+    }
+    ensure_available().expect("PDFium was verified available at startup via ensure_available(); this should not fail");
+    INSTANCE.get().expect("ensure_available() caches the instance")
 }
 
 fn bind_pdfium_at(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumError> {
@@ -43,8 +45,10 @@ fn bind_pdfium_at(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumE
 /// or blocked library (e.g. macOS Gatekeeper quarantining `libpdfium.dylib`)
 /// is reported clearly at startup instead of surfacing mid-print.
 pub fn ensure_available() -> Result<(), PdfiumError> {
-    let instance = bind_pdfium()?;
-    let _ = INSTANCE.set(instance);
+    let _guard = BINDING.lock().unwrap_or_else(PoisonError::into_inner);
+    if INSTANCE.get().is_none() {
+        let _ = INSTANCE.set(bind_pdfium_at(pdfium_library_path())?);
+    }
     Ok(())
 }
 
@@ -132,10 +136,26 @@ mod tests {
 
     #[test]
     fn binding_a_missing_library_fails() {
+        // Other tests in this process may already have bound PDFium, which
+        // makes every later binding fail regardless of the library, so the
+        // assertions run in a fresh copy of this test binary.
+        const ISOLATED: &str = "INKDROP_ISOLATED_TEST";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pdf::tests::binding_a_missing_library_fails", "--test-threads=1"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+            assert!(stdout.contains("1 passed"), "the isolated test did not run: {stdout}");
+            return;
+        }
+
         // Falls back to a system-wide PDFium, which the test machines lack.
         let missing = Some(std::path::PathBuf::from("/nonexistent/libpdfium.so"));
-        assert!(bind_pdfium_at(missing).is_err());
-        assert!(bind_pdfium_at(None).is_err());
+        assert!(matches!(bind_pdfium_at(missing), Err(PdfiumError::LoadLibraryError(_))));
+        assert!(matches!(bind_pdfium_at(None), Err(PdfiumError::LoadLibraryError(_))));
     }
 
     #[test]
