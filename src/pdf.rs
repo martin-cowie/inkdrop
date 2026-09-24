@@ -21,8 +21,8 @@ pub enum RenderError {
 
 static INSTANCE: OnceLock<Pdfium> = OnceLock::new();
 
-/// PDFium can only be bound once per process, and a library loaded by one
-/// binding attempt is visible to others, so every attempt is serialised.
+/// PDFium can only be bound once per process, so concurrent first calls to
+/// `ensure_available` are serialised rather than racing to bind.
 static BINDING: Mutex<()> = Mutex::new(());
 
 fn pdfium() -> &'static Pdfium {
@@ -33,13 +33,7 @@ fn pdfium() -> &'static Pdfium {
     INSTANCE.get().expect("ensure_available() caches the instance")
 }
 
-#[cfg(test)]
 fn bind_pdfium_at(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumError> {
-    let _guard = BINDING.lock().unwrap_or_else(PoisonError::into_inner);
-    bind_pdfium_at_unlocked(library)
-}
-
-fn bind_pdfium_at_unlocked(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumError> {
     let bindings = match library {
         Some(path) => Pdfium::bind_to_library(path).or_else(|_| Pdfium::bind_to_system_library())?,
         None => Pdfium::bind_to_system_library()?,
@@ -53,7 +47,7 @@ fn bind_pdfium_at_unlocked(library: Option<std::path::PathBuf>) -> Result<Pdfium
 pub fn ensure_available() -> Result<(), PdfiumError> {
     let _guard = BINDING.lock().unwrap_or_else(PoisonError::into_inner);
     if INSTANCE.get().is_none() {
-        let _ = INSTANCE.set(bind_pdfium_at_unlocked(pdfium_library_path())?);
+        let _ = INSTANCE.set(bind_pdfium_at(pdfium_library_path())?);
     }
     Ok(())
 }
