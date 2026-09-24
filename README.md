@@ -2,6 +2,8 @@
 
 # inkdrop
 
+[![Build](https://github.com/martin-cowie/inkdrop/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/martin-cowie/inkdrop/actions/workflows/build.yml)
+
 Drag a PDF onto a printer icon and it prints, via IPP. Printers are discovered
 automatically on the local network via mDNS, and only printers that handle
 **PDF**, **URF** or **PWG-Raster** are shown, with a badge for each. When a
