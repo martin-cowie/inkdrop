@@ -142,10 +142,26 @@ mod tests {
 
     #[test]
     fn binding_a_missing_library_fails() {
+        // Other tests in this process may already have bound PDFium, which
+        // makes every later binding fail regardless of the library, so the
+        // assertions run in a fresh copy of this test binary.
+        const ISOLATED: &str = "INKDROP_ISOLATED_TEST";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pdf::tests::binding_a_missing_library_fails", "--test-threads=1"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+            assert!(stdout.contains("1 passed"), "the isolated test did not run: {stdout}");
+            return;
+        }
+
         // Falls back to a system-wide PDFium, which the test machines lack.
         let missing = Some(std::path::PathBuf::from("/nonexistent/libpdfium.so"));
-        assert!(bind_pdfium_at(missing).is_err());
-        assert!(bind_pdfium_at(None).is_err());
+        assert!(matches!(bind_pdfium_at(missing), Err(PdfiumError::LoadLibraryError(_))));
+        assert!(matches!(bind_pdfium_at(None), Err(PdfiumError::LoadLibraryError(_))));
     }
 
     #[test]
