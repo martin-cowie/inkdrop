@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use pdfium_render::prelude::*;
 use tracing::info;
@@ -21,17 +21,25 @@ pub enum RenderError {
 
 static INSTANCE: OnceLock<Pdfium> = OnceLock::new();
 
+/// PDFium can only be bound once per process, and a library loaded by one
+/// binding attempt is visible to others, so every attempt is serialised.
+static BINDING: Mutex<()> = Mutex::new(());
+
 fn pdfium() -> &'static Pdfium {
-    INSTANCE.get_or_init(|| {
-        bind_pdfium().expect("PDFium was verified available at startup via ensure_available(); this should not fail")
-    })
+    if let Some(instance) = INSTANCE.get() {
+        return instance;
+    }
+    ensure_available().expect("PDFium was verified available at startup via ensure_available(); this should not fail");
+    INSTANCE.get().expect("ensure_available() caches the instance")
 }
 
-fn bind_pdfium() -> Result<Pdfium, PdfiumError> {
-    bind_pdfium_at(pdfium_library_path())
-}
-
+#[cfg(test)]
 fn bind_pdfium_at(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumError> {
+    let _guard = BINDING.lock().unwrap_or_else(PoisonError::into_inner);
+    bind_pdfium_at_unlocked(library)
+}
+
+fn bind_pdfium_at_unlocked(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumError> {
     let bindings = match library {
         Some(path) => Pdfium::bind_to_library(path).or_else(|_| Pdfium::bind_to_system_library())?,
         None => Pdfium::bind_to_system_library()?,
@@ -43,8 +51,10 @@ fn bind_pdfium_at(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumE
 /// or blocked library (e.g. macOS Gatekeeper quarantining `libpdfium.dylib`)
 /// is reported clearly at startup instead of surfacing mid-print.
 pub fn ensure_available() -> Result<(), PdfiumError> {
-    let instance = bind_pdfium()?;
-    let _ = INSTANCE.set(instance);
+    let _guard = BINDING.lock().unwrap_or_else(PoisonError::into_inner);
+    if INSTANCE.get().is_none() {
+        let _ = INSTANCE.set(bind_pdfium_at_unlocked(pdfium_library_path())?);
+    }
     Ok(())
 }
 
