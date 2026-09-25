@@ -25,8 +25,11 @@ pub struct Config {
     pub raster_resolutions: Vec<i32>,
     /// `pwg-raster-document-type-supported`, e.g. `srgb_8`.
     pub raster_types: Vec<&'static str>,
+    /// `printer-name`, if any.
     pub printer_name: Option<&'static str>,
+    /// `printer-info`, if any.
     pub printer_info: Option<&'static str>,
+    /// `printer-make-and-model`, if any.
     pub model: Option<&'static str>,
     /// IPP status for Get-Printer-Attributes.
     pub attributes_status: StatusCode,
@@ -36,8 +39,9 @@ pub struct Config {
     pub status_message: Option<&'static str>,
     /// `job-state` in the Print-Job response, if any.
     pub job_state: Option<IppValue>,
+    /// `job-state-reasons` in the Print-Job response; omitted if empty.
     pub job_state_reasons: Vec<&'static str>,
-    /// Whether Print-Job responses include a `job-id`.
+    /// `job-id` in the Print-Job response, if any.
     pub job_id: Option<i32>,
     /// When false, every request fails with HTTP 503 instead of an IPP answer.
     pub online: bool,
@@ -78,13 +82,16 @@ impl Config {
 /// One IPP request the fake printer received.
 #[derive(Clone, Debug)]
 pub struct Received {
+    /// The IPP operation id.
     pub operation: i16,
+    /// Every attribute group in the request.
     pub attributes: IppAttributes,
     /// The document data following the attributes (empty for queries).
     pub document: Vec<u8>,
 }
 
 impl Received {
+    /// Whether this was a Print-Job request.
     pub fn is_print_job(&self) -> bool {
         self.operation == Operation::PrintJob as i16
     }
@@ -112,12 +119,21 @@ pub struct FakePrinter {
 }
 
 impl FakePrinter {
-    /// Start on 127.0.0.1 with an OS-chosen port.
+    /// Start on 127.0.0.1 with an OS-chosen port, answering as `config` says.
+    ///
+    /// # Panics
+    ///
+    /// If it can't bind a port.
     pub async fn start(config: Config) -> Self {
         Self::start_on(IpAddr::V4(Ipv4Addr::LOCALHOST), config).await
     }
 
-    /// Start on `ip` (e.g. `0.0.0.0` to be reachable at a LAN address).
+    /// Start on `ip` (e.g. `0.0.0.0` to be reachable at a LAN address) with
+    /// an OS-chosen port, answering as `config` says.
+    ///
+    /// # Panics
+    ///
+    /// If it can't bind a port.
     pub async fn start_on(ip: IpAddr, config: Config) -> Self {
         let shared = Arc::new(Mutex::new(Shared { config, received: Vec::new() }));
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(ip, 0)).await.expect("bind fake printer");
@@ -129,6 +145,7 @@ impl FakePrinter {
         FakePrinter { addr, shared, task }
     }
 
+    /// The port the printer listens on.
     pub fn port(&self) -> u16 {
         self.addr.port()
     }
@@ -138,14 +155,17 @@ impl FakePrinter {
         format!("ipp://{}/ipp/print", self.addr)
     }
 
+    /// Apply `change` to the printer's [`Config`], from the next request on.
     pub fn configure(&self, change: impl FnOnce(&mut Config)) {
         change(&mut self.shared.lock().unwrap().config);
     }
 
+    /// Every request received so far, oldest first.
     pub fn received(&self) -> Vec<Received> {
         self.shared.lock().unwrap().received.clone()
     }
 
+    /// The Print-Job requests received so far, oldest first.
     pub fn print_jobs(&self) -> Vec<Received> {
         self.received().into_iter().filter(Received::is_print_job).collect()
     }
@@ -295,6 +315,11 @@ pub fn init_tracing() {
 pub struct TempDir(pub std::path::PathBuf);
 
 impl TempDir {
+    /// Create a directory whose name includes `label`.
+    ///
+    /// # Panics
+    ///
+    /// If the directory can't be created.
     pub fn new(label: &str) -> Self {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -304,6 +329,7 @@ impl TempDir {
         TempDir(path)
     }
 
+    /// The directory's path.
     pub fn path(&self) -> &std::path::Path {
         &self.0
     }

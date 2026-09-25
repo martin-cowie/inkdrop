@@ -1,3 +1,6 @@
+//! Sends a PDF to an IPP printer: asks what it accepts, converts the PDF to
+//! PWG-Raster if need be, and submits a Print-Job.
+
 use std::io::Cursor;
 use std::net::IpAddr;
 
@@ -9,18 +12,26 @@ use tracing::{debug, info, info_span, trace, warn, Instrument};
 use crate::discovery::Printer;
 use crate::raster::ColorMode;
 
+/// Why a document couldn't be printed.
 #[derive(Debug, thiserror::Error)]
 pub enum PrintError {
+    /// The printer accepts neither PDF nor PWG-Raster.
     #[error("printer does not support PDF, directly or via raster conversion")]
     UnsupportedFormat,
+    /// The printer URI couldn't be parsed.
     #[error("invalid printer URI: {0}")]
     InvalidUri(#[from] http::uri::InvalidUri),
+    /// The printer couldn't be reached, or its response couldn't be read.
     #[error("IPP request failed: {0}")]
     Ipp(#[from] IppError),
+    /// The IPP request couldn't be built.
     #[error("IPP build error: {0}")]
     IppBuild(#[from] IppParseError),
+    /// The PDF couldn't be rendered for raster conversion.
     #[error("PDF rendering failed: {0}")]
     Render(#[from] crate::pdf::RenderError),
+    /// The printer answered with an unsuccessful IPP status, and its
+    /// `status-message` if it gave one.
     #[error("printer rejected the request: {status:?}{}", status_detail(.message))]
     Rejected { status: StatusCode, message: Option<String> },
 }
@@ -37,6 +48,7 @@ pub enum DocumentFormat {
 }
 
 impl DocumentFormat {
+    /// The IPP `document-format` value for this format.
     pub fn mime_type(self) -> &'static str {
         match self {
             DocumentFormat::Pdf => "application/pdf",
@@ -52,20 +64,35 @@ pub enum PrintPlan {
     DirectPdf,
     /// The printer doesn't take PDF, but does take `image/pwg-raster`; the
     /// PDF is rasterized locally first.
-    PwgRaster { dpi: u32, color: ColorMode },
+    PwgRaster {
+        /// Resolution to render at, in dots per inch.
+        dpi: u32,
+        /// Colour mode to encode in.
+        color: ColorMode,
+    },
 }
 
 /// What the printer said in response to a successful Print-Job.
 #[derive(Debug)]
 pub struct Submitted {
+    /// The IPP status of the response.
     pub status: StatusCode,
+    /// `job-id`, if the printer gave one.
     pub job_id: Option<i32>,
+    /// `job-state`, e.g. "Pending", if the printer gave one.
     pub job_state: Option<String>,
+    /// `job-state-reasons`, e.g. "none"; empty if the printer gave none.
     pub job_state_reasons: Vec<String>,
 }
 
-/// Confirm how the printer wants the document, converting if necessary, then
-/// submit it as a Print-Job.
+/// Print the PDF `document` on `printer` as a job titled `job_title`: ask the
+/// printer how it wants the document, convert it if necessary, and submit it
+/// as a Print-Job. Logging is tagged with `client_ip`, the uploader's address.
+///
+/// # Errors
+///
+/// [`PrintError::UnsupportedFormat`] if the printer takes neither PDF nor
+/// PWG-Raster, and any error from [`plan_print`], [`render`] or [`submit`].
 pub async fn print_pdf(printer: &Printer, job_title: &str, client_ip: IpAddr, document: Bytes) -> Result<(), PrintError> {
     let span = info_span!("print", %client_ip, %job_title);
     async {
@@ -83,8 +110,17 @@ pub async fn print_pdf(printer: &Printer, job_title: &str, client_ip: IpAddr, do
     .await
 }
 
-/// Convert `document` into the form `plan` calls for, returning the bytes to
-/// send and their format.
+/// Convert the PDF `document` into the form `plan` calls for, returning the
+/// bytes to send and their format.
+///
+/// # Errors
+///
+/// [`PrintError::Render`] if the PDF can't be rasterised.
+///
+/// # Panics
+///
+/// If rasterising is needed and PDFium can't be loaded; see
+/// [`crate::pdf::ensure_available`].
 pub fn render(plan: &PrintPlan, document: Bytes) -> Result<(Bytes, DocumentFormat), PrintError> {
     match *plan {
         PrintPlan::DirectPdf => {
@@ -101,7 +137,16 @@ pub fn render(plan: &PrintPlan, document: Bytes) -> Result<(Bytes, DocumentForma
     }
 }
 
-/// Send `payload` to the printer as a single Print-Job request.
+/// Send `payload`, a document in `format`, to the printer at `uri` via
+/// `client` as a single Print-Job titled `job_title`.
+///
+/// Returns what the printer said about the new job.
+///
+/// # Errors
+///
+/// [`PrintError::Rejected`] if the printer refuses the job,
+/// [`PrintError::Ipp`] if it can't be reached, and [`PrintError::IppBuild`]
+/// if the request can't be built.
 pub async fn submit(
     client: &AsyncIppClient,
     uri: Uri,
@@ -147,16 +192,17 @@ pub async fn submit(
 pub struct PrinterInfo {
     /// `printer-info`, falling back to `printer-name`.
     pub name: Option<String>,
+    /// `printer-make-and-model`.
     pub model: Option<String>,
     /// Display labels of the formats it accepts (see
     /// [`crate::raster::matching_labels`]).
     pub formats: Vec<&'static str>,
 }
 
-/// Query the printer directly for the formats it advertises, for use
-/// when mDNS TXT records don't mention "pdl" at all. Any failure
-/// (unreachable, malformed response, etc.) is treated as "none" rather than
-/// propagated, since this is a best-effort discovery-time probe.
+/// Ask the printer at `uri` which supported formats it accepts, for use when
+/// its mDNS TXT record has no "pdl" key. Returns their display labels. Any
+/// failure (unreachable, malformed response, etc.) is treated as "none"
+/// rather than propagated, since this is a best-effort discovery-time probe.
 pub async fn probe_formats(uri: &Uri) -> Vec<&'static str> {
     match probe_printer(uri).await {
         Ok(info) => info.formats,
@@ -167,7 +213,13 @@ pub async fn probe_formats(uri: &Uri) -> Vec<&'static str> {
     }
 }
 
-/// Ask the printer for its name, model and supported document formats.
+/// Ask the printer at `uri` for its name, model and supported document
+/// formats.
+///
+/// # Errors
+///
+/// [`PrintError::Rejected`] if the printer answers with an unsuccessful
+/// status, and [`PrintError::Ipp`] if it can't be reached.
 pub async fn probe_printer(uri: &Uri) -> Result<PrinterInfo, PrintError> {
     let client = AsyncIppClient::new(uri.clone());
     let operation = IppOperationBuilder::get_printer_attributes(uri.clone())
@@ -202,9 +254,16 @@ pub async fn probe_printer(uri: &Uri) -> Result<PrinterInfo, PrintError> {
     })
 }
 
-/// Ask the printer what it accepts and decide how to send it a PDF. With
-/// `forced`, that format is used even if the printer doesn't advertise it,
-/// though raster resolution and color mode still come from the printer.
+/// Ask the printer at `uri`, via `client`, what it accepts and decide how to
+/// send it a PDF, preferring PDF to PWG-Raster. With `forced`, that format is
+/// used even if the printer doesn't advertise it, though raster resolution
+/// and color mode still come from the printer.
+///
+/// # Errors
+///
+/// [`PrintError::UnsupportedFormat`] if nothing is forced and the printer
+/// takes neither format, [`PrintError::Rejected`] if it answers with an
+/// unsuccessful status, and [`PrintError::Ipp`] if it can't be reached.
 pub async fn plan_print(client: &AsyncIppClient, uri: Uri, forced: Option<DocumentFormat>) -> Result<PrintPlan, PrintError> {
     let operation = IppOperationBuilder::get_printer_attributes(uri)
         .attribute(IppAttribute::DOCUMENT_FORMAT_SUPPORTED)

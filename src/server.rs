@@ -21,12 +21,15 @@ use crate::printing::{self, PrintError};
 
 const MAX_UPLOAD_BYTES: usize = 200 * 1024 * 1024;
 
+/// State shared by the request handlers.
 #[derive(Clone)]
 pub struct AppState {
+    /// The printers to list and print to.
     pub registry: Registry,
 }
 
-/// The API routes, with everything else served from `frontend_dir`.
+/// The API routes, backed by `state`, with everything else served as static
+/// files from `frontend_dir`.
 pub fn router(state: AppState, frontend_dir: impl AsRef<std::path::Path>) -> Router {
     Router::new()
         .route("/api/printers", get(printers_stream))
@@ -38,7 +41,8 @@ pub fn router(state: AppState, frontend_dir: impl AsRef<std::path::Path>) -> Rou
         .fallback_service(ServeDir::new(frontend_dir))
 }
 
-/// Printer URIs from a comma-separated list such as `INKDROP_PRINTERS`.
+/// The printer URIs in `list`, a comma-separated list such as
+/// `INKDROP_PRINTERS`, trimmed and without empty entries.
 pub fn configured_printers(list: &str) -> Vec<String> {
     list.split(',')
         .map(str::trim)
@@ -71,6 +75,9 @@ fn to_views(printers: &HashMap<String, Printer>) -> Vec<PrinterView> {
     views
 }
 
+/// `GET /api/printers`: a server-sent event stream carrying the printers in
+/// `state` as a JSON array sorted by name, first on connecting and then
+/// after every change.
 pub async fn printers_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -83,6 +90,16 @@ pub async fn printers_stream(
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
+/// `POST /api/print/{id}`: print the PDF in the first field of `multipart`
+/// on the printer `id`. `client_addr` is logged with the job.
+///
+/// Returns 204 No Content once the printer accepts the job.
+///
+/// # Errors
+///
+/// A status and message: 404 if there is no such printer, 400 if the upload
+/// is missing or malformed, 415 if it isn't `application/pdf`, 422 if the
+/// printer takes neither PDF nor PWG-Raster, and 502 if printing fails.
 pub async fn print_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,

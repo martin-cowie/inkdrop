@@ -1,3 +1,6 @@
+//! Rasterises PDF pages with PDFium, loaded at runtime from the library
+//! `build.rs` downloaded, `PDFIUM_DYNAMIC_LIB_PATH`, or a system-wide install.
+
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use pdfium_render::prelude::*;
@@ -5,16 +8,22 @@ use tracing::info;
 
 /// One rasterized PDF page, ready for raster encoding.
 pub struct RenderedPage {
+    /// Width of the bitmap, in pixels.
     pub width_px: u32,
+    /// Height of the bitmap, in pixels.
     pub height_px: u32,
+    /// Width of the PDF page, in points (1/72 inch).
     pub width_pts: f32,
+    /// Height of the PDF page, in points (1/72 inch).
     pub height_pts: f32,
     /// Packed RGB8, row-major, 3 bytes per pixel, no row padding.
     pub rgb: Vec<u8>,
 }
 
+/// Why a PDF couldn't be rendered.
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
+    /// PDFium couldn't load the document or render a page.
     #[error("PDFium error: {0}")]
     Pdfium(#[from] PdfiumError),
 }
@@ -44,6 +53,12 @@ fn bind_pdfium_at(library: Option<std::path::PathBuf>) -> Result<Pdfium, PdfiumE
 /// Verifies PDFium can be loaded and caches the bound instance, so a missing
 /// or blocked library (e.g. macOS Gatekeeper quarantining `libpdfium.dylib`)
 /// is reported clearly at startup instead of surfacing mid-print.
+///
+/// # Errors
+///
+/// [`PdfiumError`] if the library can't be loaded from
+/// `PDFIUM_DYNAMIC_LIB_PATH`, the directory `build.rs` downloaded it to, or a
+/// system-wide install.
 pub fn ensure_available() -> Result<(), PdfiumError> {
     let _guard = BINDING.lock().unwrap_or_else(PoisonError::into_inner);
     if INSTANCE.get().is_none() {
@@ -63,8 +78,19 @@ fn library_path(configured: Option<String>, downloaded: Option<&str>) -> Option<
     Some(Pdfium::pdfium_platform_library_name_at_path(&dir))
 }
 
-/// Render every page of `pdf_bytes` to an RGB8 bitmap at `dpi` dots per inch.
-/// Progress is logged per page; the caller's tracing span identifies the job.
+/// Render every page of `pdf_bytes` to an RGB8 bitmap at `dpi` dots per inch,
+/// returning the pages in order. Progress is logged per page; the caller's
+/// tracing span identifies the job.
+///
+/// # Errors
+///
+/// [`RenderError::Pdfium`] if `pdf_bytes` isn't a readable PDF or a page
+/// fails to render.
+///
+/// # Panics
+///
+/// If PDFium can't be loaded; call [`ensure_available`] first to report that
+/// as an error instead.
 pub fn render_pages(pdf_bytes: &[u8], dpi: f32) -> Result<Vec<RenderedPage>, RenderError> {
     let document = pdfium().load_pdf_from_byte_slice(pdf_bytes, None)?;
     let total_pages = document.pages().len();

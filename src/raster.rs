@@ -1,3 +1,6 @@
+//! The document formats inkdrop supports, and a PWG Raster (PWG 5102.4)
+//! encoder for rendered pages.
+
 use std::borrow::Cow;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -16,7 +19,8 @@ pub const SUPPORTED_FORMATS: &[(&str, &str)] = &[
 
 /// Match `formats` (document-format strings, from either an mDNS "pdl" TXT
 /// value or a live `document-format-supported` response) against
-/// [`SUPPORTED_FORMATS`], returning the display labels of whichever match.
+/// [`SUPPORTED_FORMATS`], ignoring case, returning the display labels of
+/// whichever match in the order of [`SUPPORTED_FORMATS`].
 pub fn matching_labels<'a>(formats: impl Iterator<Item = &'a str>) -> Vec<&'static str> {
     let formats: Vec<&str> = formats.collect();
     SUPPORTED_FORMATS
@@ -33,11 +37,14 @@ const SYNC_WORD: &[u8; 4] = b"RaS2";
 
 // cups_cspace_t values used on the wire (see CUPS's raster.h).
 const CUPS_CSPACE_SW: u32 = 18; // sGray
-const CUPS_CSPACE_SRGB: u32 = 19; // sRGB
+const CUPS_CSPACE_SRGB: u32 = 19;
 
+/// A PWG Raster colour mode, as named in `pwg-raster-document-type-supported`.
 #[derive(Clone, Copy, Debug)]
 pub enum ColorMode {
+    /// `srgb_8`: 8-bit sRGB.
     Srgb8,
+    /// `sgray_8`: 8-bit greyscale.
     Sgray8,
 }
 
@@ -57,7 +64,9 @@ impl ColorMode {
     }
 }
 
-/// Encode rendered pages as a PWG Raster (`image/pwg-raster`) byte stream.
+/// Encode `pages` as a PWG Raster (`image/pwg-raster`) document at `dpi` dots
+/// per inch in colour mode `color`, returning its bytes. Pages must have
+/// been rendered at `dpi`.
 pub fn encode(pages: &[RenderedPage], dpi: u32, color: ColorMode) -> Bytes {
     let mut out = BytesMut::new();
     out.extend_from_slice(SYNC_WORD);
@@ -117,6 +126,7 @@ fn compress_line(out: &mut BytesMut, line: &[u8], bytes_per_pixel: usize) {
 
     let count = line.len() / bytes_per_pixel;
     let pixel = |i: usize| &line[i * bytes_per_pixel..(i + 1) * bytes_per_pixel];
+    let run_starts_at = |i: usize| i + 1 < count && pixel(i) == pixel(i + 1);
 
     let mut i = 0;
     while i < count {
@@ -132,10 +142,9 @@ fn compress_line(out: &mut BytesMut, line: &[u8], bytes_per_pixel: usize) {
             continue;
         }
 
-        // A literal sequence ends where a run of two identical pixels begins.
         let start = i;
         i += 1;
-        while i < count && i - start < MAX_RUN && !(i + 1 < count && pixel(i) == pixel(i + 1)) {
+        while i < count && i - start < MAX_RUN && !run_starts_at(i) {
             i += 1;
         }
         let literal = i - start;

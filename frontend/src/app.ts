@@ -1,8 +1,20 @@
+/**
+ * The inkdrop web app: one tile per printer, each a drop target and file
+ * picker that uploads a PDF to the server for printing.
+ * @module
+ */
+
+/** A printer as the server lists it on `/api/printers`. */
 export interface Printer {
+  /** Key for `/api/print/{id}`. */
   id: string;
+  /** Display name. */
   name: string;
+  /** The printer's IPP URI. */
   uri: string;
+  /** Make and model, if the printer advertises one. */
   model: string | null;
+  /** Labels of the formats it accepts, e.g. `PDF`, `URF`, `PWG-Raster`. */
   formats: string[];
 }
 
@@ -13,7 +25,11 @@ const BRAND_HTML = `
   </div>
 `;
 
-/** Escape `value` for use in HTML text and in quoted attribute values. */
+/**
+ * Escape text for use in HTML text and in quoted attribute values.
+ * @param value - The text to escape.
+ * @returns `value` with `&`, `<`, `>`, `"` and `'` escaped.
+ */
 export function escapeHtml(value: string): string {
   const div = document.createElement('div');
   div.textContent = value;
@@ -22,7 +38,11 @@ export function escapeHtml(value: string): string {
   return div.innerHTML.replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
-/** Show `printers` as drop targets in `app`, replacing what was there. */
+/**
+ * Show printers as drop targets, or an explanation if there are none.
+ * @param app - The element to render into; its contents are replaced.
+ * @param printers - The printers to show, in order.
+ */
 export function render(app: HTMLElement, printers: Printer[]): void {
   if (printers.length === 0) {
     app.innerHTML = `
@@ -68,6 +88,11 @@ export function render(app: HTMLElement, printers: Printer[]): void {
   }
 }
 
+/**
+ * Escape a value for use in a CSS selector, where the browser supports it.
+ * @param value - The value to escape.
+ * @returns `value` escaped by `CSS.escape`, or unchanged where that's missing.
+ */
 export function cssEscape(value: string): string {
   return typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value;
 }
@@ -82,21 +107,30 @@ export function cssEscape(value: string): string {
  * See https://bugs.webkit.org/show_bug.cgi?id=223517. `dataTransfer.types`
  * is the one signal that's reliable everywhere: it contains "Files" for
  * any file drag, Safari included, even though `items` isn't usable yet.
+ *
+ * @param dataTransfer - The drag's data.
+ * @returns False for anything but a file drag, or for files whose known
+ * types don't include PDF; true otherwise.
  */
 export function draggedItemLooksDroppable(dataTransfer: DataTransfer): boolean {
   if (!Array.from(dataTransfer.types).includes('Files')) {
-    return false; // not a file drag at all (e.g. dragging selected text)
+    return false;
   }
 
   const fileItems = Array.from(dataTransfer.items).filter((item) => item.kind === 'file');
   const knownTypes = fileItems.map((item) => item.type).filter((type) => type !== '');
   if (knownTypes.length === 0) {
-    return true; // Safari: items unavailable this early — stay permissive
+    return true;
   }
 
   return knownTypes.includes('application/pdf');
 }
 
+/**
+ * Whether a file is a PDF, judged by its type or else its extension.
+ * @param file - The chosen or dropped file.
+ * @returns True if it's `application/pdf` or named `*.pdf`.
+ */
 export function isPdfFile(file: File): boolean {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 }
@@ -133,8 +167,7 @@ function wireTile(tile: HTMLDivElement, printer: Printer): void {
   };
 
   // Drag-and-drop isn't always available (touch devices, some accessibility
-  // setups) — clicking or pressing Enter/Space opens a native file picker
-  // as a fallback. The hidden <input> does the actual browsing.
+  // setups), so clicking or pressing Enter/Space opens a file picker instead.
   tile.addEventListener('click', () => fileInput.click());
   tile.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -217,20 +250,27 @@ async function sendPrintJob(
   }
 }
 
-/** Re-render `app` whenever the server sends an updated printer list. */
+/**
+ * Re-render whenever the server sends an updated printer list. Malformed
+ * events are ignored.
+ * @param app - The element to render into.
+ * @returns The open event stream.
+ */
 export function connect(app: HTMLElement): EventSource {
   const source = new EventSource('/api/printers');
   source.onmessage = (event) => {
     try {
       const printers = JSON.parse(event.data) as Printer[];
       render(app, printers);
-    } catch {
-      // ignore malformed events
-    }
+    } catch {}
   };
   return source;
 }
 
+/**
+ * Show the empty state, then follow the server's printer list.
+ * @param app - The element to render into.
+ */
 export function start(app: HTMLElement): void {
   render(app, []);
   connect(app);

@@ -1,3 +1,7 @@
+//! The inkdrop web server: discovers printers, serves the frontend from
+//! `frontend/dist` and prints PDFs uploaded to it. Listens on `PORT` (default
+//! 8080) and also lists the printers named in `INKDROP_PRINTERS`.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
@@ -22,7 +26,6 @@ async fn main() {
     let (registry, _) = watch::channel(HashMap::new());
     discovery::spawn(registry.clone());
 
-    // Printers to list without mDNS discovery, e.g. the Docker simulator.
     let configured = server::configured_printers(&std::env::var("INKDROP_PRINTERS").unwrap_or_default());
     discovery::spawn_configured(configured, registry.clone());
 

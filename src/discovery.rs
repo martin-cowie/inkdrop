@@ -1,3 +1,6 @@
+//! Finds printers that handle a supported format, by browsing mDNS or by
+//! probing configured URIs over IPP, and keeps a [`Registry`] of them.
+
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
@@ -13,11 +16,16 @@ use tracing::{debug, info, warn};
 /// one of [`crate::raster::SUPPORTED_FORMATS`].
 #[derive(Clone, Debug)]
 pub struct Printer {
+    /// Stable key for this printer in the [`Registry`], shared by its `_ipp`
+    /// and `_ipps` advertisements.
     pub id: String,
+    /// Display name: the mDNS instance name, or for a configured printer its
+    /// `printer-info` or `printer-name`.
     pub name: String,
     /// Where to send IPP requests, e.g. `ipp://192.168.1.20:631/ipp/print`.
     pub uri: Uri,
-    /// Model string from the TXT "ty" key, e.g. "DeskJet 3630 series".
+    /// Model, from the TXT "ty" key or `printer-make-and-model`, e.g.
+    /// "DeskJet 3630 series".
     pub model: Option<String>,
     /// Display labels of the formats this printer accepts, e.g.
     /// `["PDF", "URF", "PWG-Raster"]`. Always non-empty for a printer in the
@@ -25,6 +33,8 @@ pub struct Printer {
     pub formats: Vec<&'static str>,
 }
 
+/// The printers currently available, keyed by [`Printer::id`]. Subscribers
+/// are notified whenever a printer appears, changes or disappears.
 pub type Registry = watch::Sender<HashMap<String, Printer>>;
 
 const IPP_SERVICE: &str = "_ipp._tcp.local.";
@@ -48,9 +58,13 @@ impl TransportSlots {
 
 type MergeState = Arc<Mutex<HashMap<String, TransportSlots>>>;
 
-/// Spawn background tasks that browse mDNS for IPP printers that handle URF
-/// or PWG-Raster, keeping `registry` up to date as printers appear and
-/// disappear.
+/// Spawn background tasks that browse mDNS for IPP printers that handle a
+/// supported format, keeping `registry` up to date as printers appear and
+/// disappear. Printers that advertise no "pdl" TXT key are asked over IPP.
+///
+/// # Panics
+///
+/// If called outside a Tokio runtime.
 pub fn spawn(registry: Registry) {
     let merge_state: MergeState = Arc::new(Mutex::new(HashMap::new()));
 
@@ -69,9 +83,14 @@ pub fn spawn(registry: Registry) {
 /// disappears as it starts and stops, like an mDNS-advertised one.
 const CONFIGURED_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Add printers given by URI (e.g. `ipp://localhost:1631/ipp/print`) to
+/// Add the printers at `uris` (e.g. `ipp://localhost:1631/ipp/print`) to
 /// `registry`, bypassing mDNS. Each is probed over IPP periodically, and is
-/// listed only while it answers and handles a supported format.
+/// listed only while it answers and handles a supported format. A URI that
+/// isn't `ipp://host...` is logged and ignored.
+///
+/// # Panics
+///
+/// If called outside a Tokio runtime.
 pub fn spawn_configured(uris: Vec<String>, registry: Registry) {
     for uri in uris {
         let registry = registry.clone();
@@ -135,10 +154,7 @@ async fn browse(service_type: &'static str, registry: Registry, merge_state: Mer
     let daemon = ServiceDaemon::new()?;
     let receiver = daemon.browse(service_type)?;
 
-    // Maps this task's own mDNS fullnames to the merged printer id they
-    // resolved to, so a later removal (which only gives us the fullname)
-    // can find the right slot to clear. Local to this task, since each task
-    // only ever needs to undo entries it itself inserted.
+    // A removal event gives only the fullname, not the merged id.
     let mut fullname_to_id: HashMap<String, String> = HashMap::new();
 
     while let Ok(event) = receiver.recv_async().await {
@@ -202,8 +218,7 @@ fn handle_resolved(
             info!(name = %printer.name, uri = %printer.uri, formats = ?printer.formats, "discovered printer (via mDNS pdl)");
             upsert_transport(id.clone(), secure, printer, registry, merge_state);
         }
-        // No "pdl" TXT key at all: some printers omit it even though they
-        // support one of our formats. Ask the printer directly.
+        // Some printers omit "pdl" even though they support one of our formats.
         _ => {
             let printer = build_printer(&info, id.clone(), Vec::new())?;
             let registry = registry.clone();
@@ -496,12 +511,10 @@ mod tests {
         );
         assert_eq!(only_printer(&registry).uri.port_u16(), Some(443));
 
-        // Removing the secure service falls back to the plain one.
         let removed = ServiceEvent::ServiceRemoved(IPPS_SERVICE.to_owned(), "Office Printer._ipps._tcp.local.".to_owned());
         handle_event(removed, true, &mut secure, &registry, &merge);
         assert_eq!(only_printer(&registry).uri.port_u16(), Some(631));
 
-        // Unknown services and other events change nothing.
         let unknown = ServiceEvent::ServiceRemoved(IPP_SERVICE.to_owned(), "Other._ipp._tcp.local.".to_owned());
         handle_event(unknown, false, &mut insecure, &registry, &merge);
         handle_event(ServiceEvent::SearchStarted(IPP_SERVICE.to_owned()), false, &mut insecure, &registry, &merge);
