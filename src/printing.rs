@@ -89,11 +89,13 @@ pub struct Submitted {
 /// printer how it wants the document, convert it if necessary, and submit it
 /// as a Print-Job. Logging is tagged with `client_ip`, the uploader's address.
 ///
+/// Returns what the printer said about the new job.
+///
 /// # Errors
 ///
 /// [`PrintError::UnsupportedFormat`] if the printer takes neither PDF nor
 /// PWG-Raster, and any error from [`plan_print`], [`render`] or [`submit`].
-pub async fn print_pdf(printer: &Printer, job_title: &str, client_ip: IpAddr, document: Bytes) -> Result<(), PrintError> {
+pub async fn print_pdf(printer: &Printer, job_title: &str, client_ip: IpAddr, document: Bytes) -> Result<Submitted, PrintError> {
     let span = info_span!("print", %client_ip, %job_title);
     async {
         let uri = printer.uri.clone();
@@ -101,10 +103,10 @@ pub async fn print_pdf(printer: &Printer, job_title: &str, client_ip: IpAddr, do
 
         let plan = plan_print(&client, uri.clone(), None).await?;
         let (payload, format) = render(&plan, document)?;
-        submit(&client, uri, payload, format, job_title).await?;
+        let result = submit(&client, uri, payload, format, job_title).await?;
 
-        info!("print job accepted by printer");
-        Ok(())
+        info!(job_id = ?result.job_id, "print job accepted by printer");
+        Ok(result)
     }
     .instrument(span)
     .await
@@ -317,7 +319,7 @@ pub async fn plan_print(client: &AsyncIppClient, uri: Uri, forced: Option<Docume
     Ok(PrintPlan::PwgRaster { dpi, color })
 }
 
-fn status_message(response: &IppRequestResponse) -> Option<String> {
+pub(crate) fn status_message(response: &IppRequestResponse) -> Option<String> {
     response
         .attributes()
         .first_of(DelimiterTag::OperationAttributes)
@@ -342,7 +344,7 @@ fn log_attributes(context: &str, attributes: &IppAttributes) {
 
 /// Attribute values are either a single `IppValue` or an `Array` of them;
 /// present both uniformly as a list.
-fn flatten(value: &IppValue) -> Vec<&IppValue> {
+pub(crate) fn flatten(value: &IppValue) -> Vec<&IppValue> {
     match value {
         IppValue::Array(items) => items.iter().collect(),
         other => vec![other],

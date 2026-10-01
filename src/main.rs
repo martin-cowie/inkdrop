@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 use inkdrop::server::{self, AppState};
+use inkdrop::status::{Monitor, Timings};
 use inkdrop::{discovery, pdf};
 
 #[tokio::main]
@@ -29,7 +30,8 @@ async fn main() {
     let configured = server::configured_printers(&std::env::var("INKDROP_PRINTERS").unwrap_or_default());
     discovery::spawn_configured(configured, registry.clone());
 
-    let app = server::router(AppState { registry }, "frontend/dist");
+    let monitor = Monitor::spawn(&registry, Timings::default());
+    let app = server::router(AppState { registry, monitor }, "frontend/dist");
 
     let port: u16 = std::env::var("PORT")
         .ok()

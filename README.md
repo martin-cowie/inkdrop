@@ -61,18 +61,27 @@ For a release build, use `cargo build --release` (or `cargo run --release`).
 1. Open `http://localhost:8080` in a browser on the same network as a
    qualifying printer.
 2. Within a few seconds you should see a 🖨️ tile per printer found, showing
-   its name, IPP URL, model (if advertised), and which format(s) it
-   supports. If none appear, you'll see a 🤔 with
-   an explanation — check the troubleshooting section below.
+   its name, IPP URL, model (if advertised), which format(s) it supports,
+   its state (ready, printing, or stopped and why, e.g. "Stopped: out of
+   paper") and how many jobs it has queued. If none appear, you'll see a 🤔
+   with an explanation — check the troubleshooting section below.
 3. Drag a `.pdf` file from your file manager over a printer tile. The cursor
    should indicate it's droppable, and the tile highlights. Dragging a
    non-PDF file over it should show the "not allowed" cursor and a red
    highlight. (Safari doesn't reveal a file's type until it's dropped, so
    there every file looks droppable, and a non-PDF is rejected with "Not a
    PDF" on drop.)
-4. Drop the PDF on the tile. The tile shows "Printing…", then "Sent to
-   printer" on success, or an error message on failure.
+4. Drop the PDF on the tile. The tile shows "Sending…", then "Sent to
+   printer" on success, or an error message on failure. It then follows
+   your job through the printer's queue ("Your job: 2nd of 3", "Printing
+   your job") until it reports "Printed", or that the job was cancelled or
+   failed.
 5. Check the physical printer for output.
+
+Printers are only asked for their state while at least one browser has the
+page open. inkdrop subscribes to a printer's IPP event notifications
+(RFC 3995/3996) and refreshes when it reports a change; printers without
+them are polled every 5 seconds, or every 2 while jobs are queued.
 
 Watch the server's terminal output for logs — it logs each printer as it's
 discovered, and which format it's using to print (`RUST_LOG=inkdrop=debug

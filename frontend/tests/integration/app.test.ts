@@ -6,7 +6,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import indexHtml from '../../index.html?raw';
 import type { Printer } from '../../src/app';
-import { FakeEventSource, chooseFiles, dataTransfer, dragEvent, pdfFile, printer, settle } from '../helpers';
+import { FakeEventSource, chooseFiles, dataTransfer, dragEvent, pdfFile, printer, settle, status } from '../helpers';
 
 /** Uploads received, and how each printer responds. */
 const backend = {
@@ -99,7 +99,7 @@ describe('inkdrop page', () => {
     expect(target.element.classList.contains('drag-ok')).toBe(true);
 
     target.element.dispatchEvent(dragEvent('drop', dataTransfer({ files: [pdfFile('minutes.pdf')] })));
-    expect(target.status()).toBe('Printing…');
+    expect(target.status()).toBe('Sending…');
     await settle();
 
     expect(backend.uploads.map((u) => [u.printerId, u.file.name])).toEqual([['attic', 'minutes.pdf']]);
@@ -159,6 +159,36 @@ describe('inkdrop page', () => {
     await settle();
 
     expect(tile('Office').status()).toBe('printer not found');
+  });
+
+  it("follows the printer's state and the job through the queue", async () => {
+    backend.responses.set('office', Response.json({ jobId: 5 }));
+    publish([{ ...office, status: status({ state: 'processing', queued: 1, jobs: [{ id: 4, state: 'processing' }] }) }]);
+    const target = tile('Office');
+    const stateText = () => target.element.querySelector('.printer-state')!.textContent;
+    expect(stateText()).toBe('Printing');
+
+    target.element.dispatchEvent(dragEvent('drop', dataTransfer({ files: [pdfFile()] })));
+    await settle();
+    publish([
+      {
+        ...office,
+        status: status({
+          state: 'stopped',
+          reasons: ['media-empty-error'],
+          queued: 2,
+          jobs: [{ id: 4, state: 'processing-stopped' }, { id: 5, state: 'pending' }],
+        }),
+      },
+    ]);
+    expect(stateText()).toBe('Stopped: out of paper');
+    expect(target.element.classList.contains('stopped')).toBe(true);
+    expect(target.status()).toBe('Your job: 2nd of 2');
+
+    publish([{ ...office, status: status({ finished: [{ id: 5, state: 'completed' }] }) }]);
+    expect(stateText()).toBe('Ready');
+    expect(target.element.classList.contains('stopped')).toBe(false);
+    expect(target.status()).toBe('Printed');
   });
 
   it('returns to the empty state when every printer goes away', () => {

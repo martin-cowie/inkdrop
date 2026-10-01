@@ -7,8 +7,21 @@ import {
   pdfFile,
   printer,
   settle,
+  status,
 } from '../tests/helpers';
-import { connect, cssEscape, draggedItemLooksDroppable, escapeHtml, isPdfFile, render, start } from './app';
+import {
+  connect,
+  describeJob,
+  describeQueue,
+  describeReason,
+  describeState,
+  draggedItemLooksDroppable,
+  escapeHtml,
+  isPdfFile,
+  ordinal,
+  render,
+  start,
+} from './app';
 
 let app: HTMLDivElement;
 
@@ -42,17 +55,88 @@ describe('escapeHtml', () => {
   });
 });
 
-describe('cssEscape', () => {
-  it('uses CSS.escape when the browser has it', () => {
-    vi.stubGlobal('CSS', { escape: (value: string) => `escaped:${value}` });
-    expect(cssEscape('a"b')).toBe('escaped:a"b');
+describe('describeReason', () => {
+  it('describes warnings and errors, and hides reports', () => {
+    expect(describeReason('media-empty-error')).toBe('out of paper');
+    expect(describeReason('toner-low-warning')).toBe('toner low');
+    expect(describeReason('paused')).toBe('paused');
+    expect(describeReason('media-empty-report')).toBeNull();
+    expect(describeReason('none')).toBeNull();
   });
 
-  it('passes the value through without CSS.escape', () => {
-    vi.stubGlobal('CSS', undefined);
-    expect(cssEscape('abc')).toBe('abc');
-    vi.stubGlobal('CSS', {});
-    expect(cssEscape('abc')).toBe('abc');
+  it('falls back to the keyword itself', () => {
+    expect(describeReason('interpreter-resource-unavailable-error')).toBe('interpreter resource unavailable');
+  });
+});
+
+describe('describeState', () => {
+  it('says nothing until the state is known', () => {
+    expect(describeState(null)).toEqual({ text: '', alert: null });
+  });
+
+  it('names the state, with any reasons', () => {
+    expect(describeState(status())).toEqual({ text: 'Ready', alert: null });
+    expect(describeState(status({ state: 'processing', reasons: ['toner-low-warning', 'other-report'] }))).toEqual({
+      text: 'Printing: toner low',
+      alert: null,
+    });
+    expect(describeState(status({ state: 'stopped', reasons: ['media-jam-error', 'cover-open-error'] }))).toEqual({
+      text: 'Stopped: paper jam, cover open',
+      alert: 'stopped',
+    });
+    expect(describeState(status({ state: 'unreachable' }))).toEqual({ text: 'Not responding', alert: 'unreachable' });
+    expect(describeState(status({ state: 'warming-up' })).text).toBe('warming-up');
+  });
+
+  it("falls back to a stopped printer's own message", () => {
+    expect(describeState(status({ state: 'stopped', message: 'Call for service' })).text).toBe('Stopped: Call for service');
+    expect(describeState(status({ state: 'stopped' })).text).toBe('Stopped');
+    expect(describeState(status({ message: 'Sleeping' })).text).toBe('Ready');
+  });
+});
+
+describe('describeQueue', () => {
+  it('counts queued jobs', () => {
+    expect(describeQueue(null)).toBe('');
+    expect(describeQueue(status())).toBe('');
+    expect(describeQueue(status({ queued: 1 }))).toBe('1 job queued');
+    expect(describeQueue(status({ queued: 4 }))).toBe('4 jobs queued');
+  });
+});
+
+describe('ordinal', () => {
+  it('uses the right suffix', () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111].map(ordinal)).toEqual([
+      '1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '101st', '111th',
+    ]);
+  });
+});
+
+describe('describeJob', () => {
+  const queue = (state: string) => status({ queued: 3, jobs: [{ id: 1, state: 'processing' }, { id: 7, state }] });
+
+  it("gives a queued job's position", () => {
+    expect(describeJob(queue('pending'), 7)).toEqual({ text: 'Your job: 2nd of 3', outcome: 'success', finished: false });
+    expect(describeJob(status({ queued: 0, jobs: [{ id: 7, state: 'pending' }] }), 7)?.text).toBe('Your job: 1st of 1');
+  });
+
+  it('describes jobs printing, held or stopped', () => {
+    expect(describeJob(queue('processing'), 7)?.text).toBe('Printing your job');
+    expect(describeJob(queue('pending-held'), 7)).toEqual({ text: 'Your job is on hold', outcome: 'waiting', finished: false });
+    expect(describeJob(queue('processing-stopped'), 7)?.text).toBe('Your job has stopped');
+  });
+
+  it('describes finished jobs', () => {
+    const finished = (state: string) => describeJob(status({ finished: [{ id: 7, state }] }), 7);
+    expect(finished('completed')).toEqual({ text: 'Printed', outcome: 'success', finished: true });
+    expect(finished('canceled')).toEqual({ text: 'Your job was cancelled', outcome: 'failure', finished: true });
+    expect(finished('aborted')).toEqual({ text: 'Your job failed', outcome: 'failure', finished: true });
+    expect(finished('forgotten')).toEqual({ text: 'Finished', outcome: 'success', finished: true });
+  });
+
+  it('knows nothing of jobs the status does not mention', () => {
+    expect(describeJob(null, 7)).toBeNull();
+    expect(describeJob(queue('pending'), 99)).toBeNull();
   });
 });
 
@@ -125,20 +209,42 @@ describe('render', () => {
     expect(tile.querySelector('.model')?.textContent).toBe('<b>bold</b>');
   });
 
-  it('leaves a tile unwired if it cannot be found again', () => {
-    vi.stubGlobal('CSS', { escape: () => 'no-such-id' });
-    const fetch = mockFetch(async () => new Response(null, { status: 204 }));
-
-    render(app, [printer()]);
-    tileParts().tile.dispatchEvent(dragEvent('drop', dataTransfer({ files: [pdfFile()] })));
-
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
   it('replaces the previous printers', () => {
     render(app, [printer()]);
     render(app, [printer({ id: 'p9', name: 'New' })]);
     expect([...app.querySelectorAll('.printer-tile')].map((t) => (t as HTMLElement).dataset.id)).toEqual(['p9']);
+  });
+
+  it('updates tiles in place, in the order given', () => {
+    render(app, [printer({ id: 'a', name: 'A' }), printer({ id: 'b', name: 'B' })]);
+    const [a, b] = app.querySelectorAll<HTMLDivElement>('.printer-tile');
+    a.querySelector('.status')!.textContent = 'in progress';
+
+    render(app, [printer({ id: 'b', name: 'B' }), printer({ id: 'a', name: 'A2', model: null, formats: [] })]);
+
+    const tiles = [...app.querySelectorAll<HTMLDivElement>('.printer-tile')];
+    expect(tiles).toEqual([b, a]);
+    expect(a.querySelector('.name')?.textContent).toBe('A2');
+    expect(a.getAttribute('aria-label')).toBe('Print to A2');
+    expect(a.querySelector('.meta')?.innerHTML).toBe('');
+    expect(a.querySelector('.status')?.textContent).toBe('in progress');
+  });
+
+  it("shows each printer's state and queue", () => {
+    render(app, [printer({ status: status({ state: 'processing', queued: 2 }) })]);
+    const { tile } = tileParts();
+    expect(tile.querySelector('.printer-state')?.textContent).toBe('Printing');
+    expect(tile.querySelector('.queue')?.textContent).toBe('2 jobs queued');
+    expect(tile.className).toBe('printer-tile');
+
+    render(app, [printer({ status: status({ state: 'stopped', reasons: ['media-empty-error'] }) })]);
+    expect(tile.querySelector('.printer-state')?.textContent).toBe('Stopped: out of paper');
+    expect(tile.querySelector('.queue')?.textContent).toBe('');
+    expect(tile.classList.contains('stopped')).toBe(true);
+
+    render(app, [printer({ status: status({ state: 'unreachable' }) })]);
+    expect(tile.classList.contains('stopped')).toBe(false);
+    expect(tile.classList.contains('unreachable')).toBe(true);
   });
 });
 
@@ -292,7 +398,7 @@ describe('a printer tile', () => {
       drop(pdfFile('report.pdf'));
 
       expect(tile.classList.contains('sending')).toBe(true);
-      expect(status.textContent).toBe('Printing…');
+      expect(status.textContent).toBe('Sending…');
       const [url, init] = fetch.mock.calls[0];
       expect(url).toBe('/api/print/office%2F1');
       expect(init?.method).toBe('POST');
@@ -365,6 +471,80 @@ describe('a printer tile', () => {
       vi.advanceTimersByTime(500);
 
       expect(status.textContent).toBe('Sent to printer');
+    });
+
+    describe('following the job', () => {
+      const accepted = (jobId: number | null) => mockFetch(async () => Response.json({ jobId }));
+      const office = (overrides: Parameters<typeof status>[0]) => [printer({ id: 'office/1', status: status(overrides) })];
+
+      it('shows its place in the queue until it has printed', async () => {
+        accepted(7);
+        const { tile, status: message } = tileParts();
+        drop(pdfFile());
+        await settle();
+        expect(message.textContent).toBe('Sent to printer');
+
+        render(app, office({ queued: 2, jobs: [{ id: 3, state: 'processing' }, { id: 7, state: 'pending' }] }));
+        expect(message.textContent).toBe('Your job: 2nd of 2');
+
+        render(app, office({ queued: 1, jobs: [{ id: 7, state: 'processing' }] }));
+        expect(message.textContent).toBe('Printing your job');
+
+        render(app, office({ state: 'stopped', queued: 1, jobs: [{ id: 7, state: 'processing-stopped' }] }));
+        expect(message.textContent).toBe('Your job has stopped');
+        expect(tile.classList.contains('waiting')).toBe(true);
+
+        render(app, office({ finished: [{ id: 7, state: 'completed' }] }));
+        expect(message.textContent).toBe('Printed');
+        expect(tile.classList.contains('success')).toBe(true);
+
+        vi.advanceTimersByTime(5000);
+        expect(message.textContent).toBe('');
+        render(app, office({ finished: [{ id: 7, state: 'completed' }] }));
+        expect(message.textContent, 'a finished job is not shown again').toBe('');
+      });
+
+      it('picks up a job the printer reported before the upload finished', async () => {
+        let respond!: (response: Response) => void;
+        mockFetch(() => new Promise((resolve) => (respond = resolve)));
+        drop(pdfFile());
+        render(app, office({ queued: 1, jobs: [{ id: 9, state: 'pending' }] }));
+
+        respond(Response.json({ jobId: 9 }));
+        await settle();
+
+        expect(tileParts().status.textContent).toBe('Your job: 1st of 1');
+      });
+
+      it('reports a cancelled job as a failure', async () => {
+        accepted(7);
+        drop(pdfFile());
+        await settle();
+        render(app, office({ finished: [{ id: 7, state: 'canceled' }] }));
+
+        expect(tileParts().status.textContent).toBe('Your job was cancelled');
+        expect(tileParts().tile.classList.contains('failure')).toBe(true);
+      });
+
+      it('stops following a job once another file is dropped', async () => {
+        accepted(7);
+        drop(pdfFile());
+        await settle();
+        drop(pdfFile('photo.png', 'image/png'));
+
+        render(app, office({ queued: 1, jobs: [{ id: 7, state: 'pending' }] }));
+
+        expect(tileParts().status.textContent).toBe('Not a PDF');
+      });
+
+      it('just confirms the upload when the printer gives no job id', async () => {
+        accepted(null);
+        drop(pdfFile());
+        await settle();
+        expect(tileParts().status.textContent).toBe('Sent to printer');
+        vi.advanceTimersByTime(3000);
+        expect(tileParts().status.textContent).toBe('');
+      });
     });
 
     it('clears a failure after a while', async () => {

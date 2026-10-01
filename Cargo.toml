@@ -13,6 +13,7 @@ http = "1.5.0"
 ipp = "7.0.0"
 mdns-sd = "0.21.3"
 pdfium-render = "0.9.4"
+reqwest = { version = "0.13", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
