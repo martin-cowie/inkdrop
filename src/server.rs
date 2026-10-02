@@ -1,5 +1,5 @@
-//! The web server: an SSE stream of discovered printers, an upload endpoint
-//! that prints a PDF, and the static frontend.
+//! The web server: an SSE stream of discovered printers and their statuses,
+//! an upload endpoint that prints a PDF, and the static frontend.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -9,8 +9,8 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
-use axum::Router;
-use futures_util::stream::{Stream, StreamExt};
+use axum::{Json, Router};
+use futures_util::stream::{self, Stream, StreamExt};
 use serde::Serialize;
 use tokio_stream::wrappers::WatchStream;
 use tower_http::services::ServeDir;
@@ -18,6 +18,7 @@ use tracing::{error, info};
 
 use crate::discovery::{Printer, Registry};
 use crate::printing::{self, PrintError};
+use crate::status::{Monitor, PrinterStatus};
 
 const MAX_UPLOAD_BYTES: usize = 200 * 1024 * 1024;
 
@@ -26,6 +27,8 @@ const MAX_UPLOAD_BYTES: usize = 200 * 1024 * 1024;
 pub struct AppState {
     /// The printers to list and print to.
     pub registry: Registry,
+    /// The printers' statuses, and the jobs to follow.
+    pub monitor: Monitor,
 }
 
 /// The API routes, backed by `state`, with everything else served as static
@@ -58,10 +61,11 @@ struct PrinterView {
     uri: String,
     model: Option<String>,
     formats: Vec<&'static str>,
+    status: Option<PrinterStatus>,
 }
 
-fn to_views(printers: &HashMap<String, Printer>) -> Vec<PrinterView> {
-    let mut views: Vec<PrinterView> = printers
+fn to_views(printers: &HashMap<String, Printer>, statuses: &HashMap<String, PrinterStatus>) -> Vec<PrinterView> {
+    let mut result: Vec<PrinterView> = printers
         .values()
         .map(|p| PrinterView {
             id: p.id.clone(),
@@ -69,31 +73,50 @@ fn to_views(printers: &HashMap<String, Printer>) -> Vec<PrinterView> {
             uri: p.uri.to_string(),
             model: p.model.clone(),
             formats: p.formats.clone(),
+            status: statuses.get(&p.id).cloned(),
         })
         .collect();
-    views.sort_by(|a, b| a.name.cmp(&b.name));
-    views
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    result
 }
 
 /// `GET /api/printers`: a server-sent event stream carrying the printers in
-/// `state` as a JSON array sorted by name, first on connecting and then
-/// after every change.
+/// `state`, with their statuses, as a JSON array sorted by name: first on
+/// connecting, then after every change. Printers are only contacted for
+/// their statuses while at least one such stream is open.
 pub async fn printers_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let watch_rx = state.registry.subscribe();
-    let stream = WatchStream::new(watch_rx).map(|printers| {
-        let views = to_views(&printers);
-        Ok(Event::default().json_data(views).unwrap_or_else(|_| Event::default().data("[]")))
+    let statuses = state.monitor.statuses().subscribe();
+    let changes = stream::select(
+        WatchStream::new(state.registry.subscribe()).map(|_| ()),
+        WatchStream::new(statuses.clone()).map(|_| ()),
+    );
+    let mut last_sent = None;
+    let stream = changes.filter_map(move |()| {
+        let views = to_views(&state.registry.borrow(), &statuses.borrow());
+        let json = serde_json::to_string(&views).unwrap_or_else(|_| "[]".to_owned());
+        let event = (last_sent.as_ref() != Some(&json)).then(|| Ok(Event::default().data(&json)));
+        last_sent = Some(json);
+        std::future::ready(event)
     });
 
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
+/// The response to a print request.
+#[derive(Serialize)]
+pub struct Printed {
+    /// The printer's id for the new job, if it gave one.
+    #[serde(rename = "jobId")]
+    pub job_id: Option<i32>,
+}
+
 /// `POST /api/print/{id}`: print the PDF in the first field of `multipart`
-/// on the printer `id`. `client_addr` is logged with the job.
+/// on the printer `id`, and follow the job in the printer's status.
+/// `client_addr` is logged with the job.
 ///
-/// Returns 204 No Content once the printer accepts the job.
+/// Returns the job id once the printer accepts the job.
 ///
 /// # Errors
 ///
@@ -105,7 +128,7 @@ pub async fn print_handler(
     Path(id): Path<String>,
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     mut multipart: Multipart,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<Json<Printed>, (StatusCode, String)> {
     let printer = {
         let printers = state.registry.borrow();
         printers.get(&id).cloned()
@@ -141,7 +164,7 @@ pub async fn print_handler(
         "received PDF print job"
     );
 
-    printing::print_pdf(&printer, &job_title, client_addr.ip(), document)
+    let submitted = printing::print_pdf(&printer, &job_title, client_addr.ip(), document)
         .await
         .map_err(|err| match err {
             PrintError::UnsupportedFormat => (
@@ -154,7 +177,10 @@ pub async fn print_handler(
             }
         })?;
 
-    Ok(StatusCode::NO_CONTENT)
+    if let Some(job_id) = submitted.job_id {
+        state.monitor.job_submitted(&id, job_id);
+    }
+    Ok(Json(Printed { job_id: submitted.job_id }))
 }
 
 #[cfg(test)]
@@ -165,6 +191,48 @@ mod tests {
 
     use super::*;
     use crate::test_support::{self, A4, Config, FakePrinter};
+
+    /// The JSON events of a `/api/printers` stream.
+    struct Events {
+        body: std::pin::Pin<Box<dyn Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+        buffer: String,
+    }
+
+    impl Events {
+        async fn open(base: &str) -> Self {
+            let response = reqwest::get(format!("{base}/api/printers")).await.unwrap();
+            assert_eq!(response.headers()["content-type"], "text/event-stream");
+            Events { body: Box::pin(response.bytes_stream()), buffer: String::new() }
+        }
+
+        async fn next(&mut self) -> serde_json::Value {
+            loop {
+                if let Some(end) = self.buffer.find("\n\n") {
+                    let event: String = self.buffer.drain(..end + 2).collect();
+                    if let Some(data) = event.lines().find_map(|line| line.strip_prefix("data: ")) {
+                        return serde_json::from_str(data).unwrap();
+                    }
+                    continue;
+                }
+                let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), self.body.try_next())
+                    .await
+                    .expect("timed out waiting for an event")
+                    .unwrap()
+                    .expect("stream ended");
+                self.buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+            }
+        }
+
+        /// Skip events until `done` accepts one, returning it.
+        async fn until(&mut self, mut done: impl FnMut(&serde_json::Value) -> bool) -> serde_json::Value {
+            loop {
+                let event = self.next().await;
+                if done(&event) {
+                    return event;
+                }
+            }
+        }
+    }
 
     fn printer(id: &str, name: &str, uri: &str, formats: Vec<&'static str>) -> Printer {
         Printer {
@@ -181,7 +249,8 @@ mod tests {
         test_support::init_tracing();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(AppState { registry }, frontend_dir);
+        let monitor = Monitor::spawn(&registry, test_support::quick_timings());
+        let app = router(AppState { registry, monitor }, frontend_dir);
         tokio::spawn(async move {
             axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
         });
@@ -218,12 +287,12 @@ mod tests {
             ("2".to_owned(), printer("2", "Zebra", "ipp://z/ipp/print", vec!["PDF"])),
             ("1".to_owned(), printer("1", "Alpha", "ipp://a/ipp/print", vec!["URF", "PWG-Raster"])),
         ]);
-        let json = serde_json::to_value(to_views(&printers)).unwrap();
+        let json = serde_json::to_value(to_views(&printers, &HashMap::new())).unwrap();
         assert_eq!(
             json,
             serde_json::json!([
-                {"id": "1", "name": "Alpha", "uri": "ipp://a/ipp/print", "model": "Model", "formats": ["URF", "PWG-Raster"]},
-                {"id": "2", "name": "Zebra", "uri": "ipp://z/ipp/print", "model": "Model", "formats": ["PDF"]},
+                {"id": "1", "name": "Alpha", "uri": "ipp://a/ipp/print", "model": "Model", "formats": ["URF", "PWG-Raster"], "status": null},
+                {"id": "2", "name": "Zebra", "uri": "ipp://z/ipp/print", "model": "Model", "formats": ["PDF"], "status": null},
             ])
         );
     }
@@ -233,30 +302,49 @@ mod tests {
         let registry = watch::channel(HashMap::new()).0;
         let base = serve(registry.clone(), std::path::Path::new("does-not-exist")).await;
 
-        let response = reqwest::get(format!("{base}/api/printers")).await.unwrap();
-        assert_eq!(response.headers()["content-type"], "text/event-stream");
-        let mut body = response.bytes_stream();
-        let mut buffer = String::new();
-        let mut next_event = async || loop {
-            if let Some(end) = buffer.find("\n\n") {
-                let event: String = buffer.drain(..end + 2).collect();
-                if let Some(data) = event.lines().find_map(|line| line.strip_prefix("data: ")) {
-                    return serde_json::from_str::<serde_json::Value>(data).unwrap();
-                }
-                continue;
-            }
-            let chunk = body.try_next().await.unwrap().expect("stream ended");
-            buffer.push_str(std::str::from_utf8(&chunk).unwrap());
-        };
-
-        assert_eq!(next_event().await, serde_json::json!([]));
+        let mut events = Events::open(&base).await;
+        assert_eq!(events.next().await, serde_json::json!([]));
 
         registry.send_modify(|map| {
-            map.insert("p".to_owned(), printer("p", "Office", "ipp://office/ipp/print", vec!["PDF"]));
+            map.insert("p".to_owned(), printer("p", "Office", "ipp://127.0.0.1:1/ipp/print", vec!["PDF"]));
         });
-        let update = next_event().await;
+        let update = events.next().await;
         assert_eq!(update[0]["name"], "Office");
         assert_eq!(update[0]["formats"], serde_json::json!(["PDF"]));
+
+        let unreachable = events.until(|printers| !printers[0]["status"].is_null()).await;
+        assert_eq!(unreachable[0]["status"]["state"], "unreachable");
+    }
+
+    #[tokio::test]
+    async fn printers_stream_follows_the_printer_state_and_submitted_jobs() {
+        let fake = FakePrinter::start(Config { notifications: true, ..Config::default() }).await;
+        let base = serve_printer(printer("p", "Fake", &fake.uri(), vec!["PDF"])).await;
+        let mut events = Events::open(&base).await;
+        let ready = events.until(|printers| !printers[0]["status"].is_null()).await;
+        assert_eq!(
+            ready[0]["status"],
+            serde_json::json!({"state": "idle", "reasons": [], "message": null, "queued": 0, "jobs": [], "finished": []})
+        );
+
+        let (status, body) = post(&base, "p", Form::new().part("file", pdf_part(Some("a.pdf")))).await;
+        assert_eq!((status, body.as_str()), (200, r#"{"jobId":42}"#));
+        let queued = events.until(|printers| printers[0]["status"]["queued"] == 1).await;
+        assert_eq!(queued[0]["status"]["jobs"], serde_json::json!([{"id": 42, "state": "pending"}]));
+
+        fake.configure(|c| {
+            c.printer_state = ipp::model::PrinterState::Stopped;
+            c.printer_state_reasons = vec!["media-empty-error"];
+            c.printer_state_message = Some("Load paper");
+        });
+        let stopped = events.until(|printers| printers[0]["status"]["state"] == "stopped").await;
+        assert_eq!(stopped[0]["status"]["reasons"], serde_json::json!(["media-empty-error"]));
+        assert_eq!(stopped[0]["status"]["message"], "Load paper");
+
+        fake.set_job_state(42, ipp::model::JobState::Completed);
+        let finished = events.until(|printers| printers[0]["status"]["finished"] != serde_json::json!([])).await;
+        assert_eq!(finished[0]["status"]["finished"], serde_json::json!([{"id": 42, "state": "completed"}]));
+        assert_eq!(finished[0]["status"]["jobs"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -264,13 +352,16 @@ mod tests {
         let fake = FakePrinter::start(Config::default()).await;
         let base = serve_printer(printer("p", "Fake", &fake.uri(), vec!["PDF"])).await;
 
-        let (status, _) = post(&base, "p", Form::new().part("file", pdf_part(Some("report.pdf")))).await;
-        assert_eq!(status, 204);
-        let (status, _) = post(&base, "p", Form::new().part("file", pdf_part(None))).await;
-        assert_eq!(status, 204);
+        let (status, body) = post(&base, "p", Form::new().part("file", pdf_part(Some("report.pdf")))).await;
+        assert_eq!((status, body.as_str()), (200, r#"{"jobId":42}"#));
+        let (status, body) = post(&base, "p", Form::new().part("file", pdf_part(None))).await;
+        assert_eq!((status, body.as_str()), (200, r#"{"jobId":43}"#));
+        fake.configure(|c| c.job_id = None);
+        let (status, body) = post(&base, "p", Form::new().part("file", pdf_part(None))).await;
+        assert_eq!((status, body.as_str()), (200, r#"{"jobId":null}"#));
 
         let jobs = fake.print_jobs();
-        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs.len(), 3);
         assert_eq!(jobs[0].attr("job-name").as_deref(), Some("report.pdf"));
         assert_eq!(jobs[1].attr("job-name").as_deref(), Some("document.pdf"));
         assert_eq!(jobs[0].document, test_support::pdf(&[A4]));

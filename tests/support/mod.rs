@@ -6,14 +6,17 @@
 use std::io::{Cursor, Read};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{StatusCode as HttpStatus, header};
 use axum::response::{IntoResponse, Response};
+use inkdrop::notifications::{self as events, Message, Value};
 use ipp::parser::IppParser;
 use ipp::prelude::*;
 use ipp::value::{BoundedString, IppTextValue};
+use tokio::sync::watch;
 
 /// How the fake printer describes itself and answers requests. Changes made
 /// with [`FakePrinter::configure`] apply to the next request.
@@ -31,6 +34,12 @@ pub struct Config {
     pub printer_info: Option<&'static str>,
     /// `printer-make-and-model`, if any.
     pub model: Option<&'static str>,
+    /// `printer-state`.
+    pub printer_state: PrinterState,
+    /// `printer-state-reasons`; `none` if empty.
+    pub printer_state_reasons: Vec<&'static str>,
+    /// `printer-state-message`, if any.
+    pub printer_state_message: Option<&'static str>,
     /// IPP status for Get-Printer-Attributes.
     pub attributes_status: StatusCode,
     /// IPP status for Print-Job.
@@ -41,8 +50,18 @@ pub struct Config {
     pub job_state: Option<IppValue>,
     /// `job-state-reasons` in the Print-Job response; omitted if empty.
     pub job_state_reasons: Vec<&'static str>,
-    /// `job-id` in the Print-Job response, if any.
+    /// `job-id` of the first job, numbered upwards from there; with `None`,
+    /// jobs get no id and aren't queued.
     pub job_id: Option<i32>,
+    /// Whether the printer supports event notifications: subscriptions with
+    /// the `ippget` pull method.
+    pub notifications: bool,
+    /// How long Get-Notifications with `notify-wait` waits for an event
+    /// before answering without one.
+    pub notify_wait: Duration,
+    /// Whether a waiting Get-Notifications answers without the events that
+    /// woke it, as `ippserver` does, leaving them for the next request.
+    pub notify_wakes_empty: bool,
     /// When false, every request fails with HTTP 503 instead of an IPP answer.
     pub online: bool,
 }
@@ -56,12 +75,18 @@ impl Default for Config {
             printer_name: Some("fake-printer"),
             printer_info: Some("Fake Printer"),
             model: Some("Fake Model 1"),
+            printer_state: PrinterState::Idle,
+            printer_state_reasons: Vec::new(),
+            printer_state_message: None,
             attributes_status: StatusCode::SuccessfulOk,
             print_status: StatusCode::SuccessfulOk,
             status_message: None,
             job_state: Some(IppValue::Enum(JobState::Pending as i32)),
             job_state_reasons: vec!["none"],
             job_id: Some(42),
+            notifications: false,
+            notify_wait: Duration::from_millis(500),
+            notify_wakes_empty: false,
             online: true,
         }
     }
@@ -84,7 +109,8 @@ impl Config {
 pub struct Received {
     /// The IPP operation id.
     pub operation: i16,
-    /// Every attribute group in the request.
+    /// Every attribute group in the request; empty for subscription
+    /// operations, whose groups the `ipp` crate can't represent.
     pub attributes: IppAttributes,
     /// The document data following the attributes (empty for queries).
     pub document: Vec<u8>,
@@ -105,16 +131,52 @@ impl Received {
     }
 }
 
+/// A job in the fake printer's queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FakeJob {
+    /// The job's `job-id`.
+    pub id: i32,
+    /// The job's `job-state`.
+    pub state: JobState,
+}
+
+impl FakeJob {
+    fn is_finished(&self) -> bool {
+        matches!(self.state, JobState::Canceled | JobState::Aborted | JobState::Completed)
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     config: Config,
     received: Vec<Received>,
+    jobs: Vec<FakeJob>,
+    jobs_created: i32,
+    /// Every event raised, numbered from 1 by position.
+    events: Vec<&'static str>,
+    subscriptions: Vec<i32>,
+    subscriptions_created: i32,
+}
+
+struct Fake {
+    shared: Mutex<Shared>,
+    /// The number of events raised, for Get-Notifications to wait on.
+    event_count: watch::Sender<usize>,
+}
+
+impl Fake {
+    fn raise(&self, shared: &mut Shared, event: &'static str) {
+        shared.events.push(event);
+        self.event_count.send_replace(shared.events.len());
+    }
 }
 
 /// An IPP printer on a local port, served over plain HTTP as `ipp://` is.
+/// Print-Job queues a job, which stays pending until changed with
+/// [`FakePrinter::set_job_state`].
 pub struct FakePrinter {
     addr: SocketAddr,
-    shared: Arc<Mutex<Shared>>,
+    fake: Arc<Fake>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -135,14 +197,26 @@ impl FakePrinter {
     ///
     /// If it can't bind a port.
     pub async fn start_on(ip: IpAddr, config: Config) -> Self {
-        let shared = Arc::new(Mutex::new(Shared { config, received: Vec::new() }));
-        let listener = tokio::net::TcpListener::bind(SocketAddr::new(ip, 0)).await.expect("bind fake printer");
-        let addr = listener.local_addr().unwrap();
-        let app = axum::Router::new().fallback(handle).with_state(shared.clone());
+        Self::start_at(SocketAddr::new(ip, 0), config).await.expect("bind fake printer")
+    }
+
+    /// Start on `addr`, answering as `config` says.
+    ///
+    /// # Errors
+    ///
+    /// If `addr` can't be bound, e.g. because the port is in use.
+    pub async fn start_at(addr: SocketAddr, config: Config) -> std::io::Result<Self> {
+        let fake = Arc::new(Fake {
+            shared: Mutex::new(Shared { config, ..Shared::default() }),
+            event_count: watch::channel(0).0,
+        });
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let addr = listener.local_addr()?;
+        let app = axum::Router::new().fallback(handle).with_state(fake.clone());
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        FakePrinter { addr, shared, task }
+        Ok(FakePrinter { addr, fake, task })
     }
 
     /// The port the printer listens on.
@@ -155,19 +229,84 @@ impl FakePrinter {
         format!("ipp://{}/ipp/print", self.addr)
     }
 
-    /// Apply `change` to the printer's [`Config`], from the next request on.
+    /// Apply `change` to the printer's [`Config`], from the next request on,
+    /// raising a `printer-state-changed` event.
     pub fn configure(&self, change: impl FnOnce(&mut Config)) {
-        change(&mut self.shared.lock().unwrap().config);
+        let mut shared = self.fake.shared.lock().unwrap();
+        change(&mut shared.config);
+        self.fake.raise(&mut shared, "printer-state-changed");
+    }
+
+    /// The printer's current [`Config`].
+    pub fn config(&self) -> Config {
+        self.fake.shared.lock().unwrap().config.clone()
     }
 
     /// Every request received so far, oldest first.
     pub fn received(&self) -> Vec<Received> {
-        self.shared.lock().unwrap().received.clone()
+        self.fake.shared.lock().unwrap().received.clone()
     }
 
     /// The Print-Job requests received so far, oldest first.
     pub fn print_jobs(&self) -> Vec<Received> {
         self.received().into_iter().filter(Received::is_print_job).collect()
+    }
+
+    /// Every job the printer knows, in queue order.
+    pub fn jobs(&self) -> Vec<FakeJob> {
+        self.fake.shared.lock().unwrap().jobs.clone()
+    }
+
+    /// Move job `id` to `state`, raising `job-state-changed`, and
+    /// `job-completed` too if the job has finished.
+    ///
+    /// # Panics
+    ///
+    /// If there is no such job.
+    pub fn set_job_state(&self, id: i32, state: JobState) {
+        let mut shared = self.fake.shared.lock().unwrap();
+        if Self::change_job(&mut shared, id, state) {
+            self.fake.raise(&mut shared, "job-completed");
+        }
+        self.fake.raise(&mut shared, "job-state-changed");
+    }
+
+    /// Move job `id` to `state` without raising any event, as printers
+    /// sometimes fail to.
+    ///
+    /// # Panics
+    ///
+    /// If there is no such job.
+    pub fn set_job_state_quietly(&self, id: i32, state: JobState) {
+        Self::change_job(&mut self.fake.shared.lock().unwrap(), id, state);
+    }
+
+    /// Returns whether the job has finished.
+    fn change_job(shared: &mut Shared, id: i32, state: JobState) -> bool {
+        let job = shared.jobs.iter_mut().find(|job| job.id == id).expect("no such job");
+        job.state = state;
+        job.is_finished()
+    }
+
+    /// Forget job `id`, as printers that keep little history do, so that
+    /// Get-Job-Attributes no longer finds it.
+    pub fn forget_job(&self, id: i32) {
+        self.fake.shared.lock().unwrap().jobs.retain(|job| job.id != id);
+    }
+
+    /// The ids of the event subscriptions currently open.
+    pub fn subscriptions(&self) -> Vec<i32> {
+        self.fake.shared.lock().unwrap().subscriptions.clone()
+    }
+
+    /// Drop every subscription, as a printer does when it restarts.
+    pub fn drop_subscriptions(&self) {
+        self.fake.shared.lock().unwrap().subscriptions.clear();
+    }
+
+    /// How many requests of IPP operation `operation` have been received.
+    pub fn count(&self, operation: u16) -> usize {
+        self.received().iter().filter(|request| request.operation as u16 == operation).count()
     }
 }
 
@@ -177,7 +316,12 @@ impl Drop for FakePrinter {
     }
 }
 
-async fn handle(State(shared): State<Arc<Mutex<Shared>>>, body: Bytes) -> Response {
+async fn handle(State(fake): State<Arc<Fake>>, body: Bytes) -> Response {
+    let operation = body.get(2..4).map(|code| u16::from_be_bytes([code[0], code[1]]));
+    if let Some(operation @ (events::CREATE_PRINTER_SUBSCRIPTIONS | events::CANCEL_SUBSCRIPTION | events::GET_NOTIFICATIONS)) = operation {
+        return handle_subscription(&fake, operation, &body).await;
+    }
+
     let request = match IppParser::new(Cursor::new(body.to_vec())).parse() {
         Ok(request) => request,
         Err(err) => return (HttpStatus::BAD_REQUEST, err.to_string()).into_response(),
@@ -187,60 +331,205 @@ async fn handle(State(shared): State<Arc<Mutex<Shared>>>, body: Bytes) -> Respon
     let mut document = Vec::new();
     request.into_payload().read_to_end(&mut document).unwrap();
 
-    let mut shared = shared.lock().unwrap();
-    shared.received.push(Received { operation: header.operation_or_status, attributes, document });
+    let mut shared = fake.shared.lock().unwrap();
+    shared.received.push(Received { operation: header.operation_or_status, attributes: attributes.clone(), document });
     let config = shared.config.clone();
-    drop(shared);
-
     if !config.online {
         return (HttpStatus::SERVICE_UNAVAILABLE, "offline").into_response();
     }
 
-    let is_print_job = header.operation_or_status == Operation::PrintJob as i16;
-    let status = if is_print_job { config.print_status } else { config.attributes_status };
+    let operation = header.operation_or_status;
+    let operation_attr = |name: &str| {
+        attributes.first_of(DelimiterTag::OperationAttributes).and_then(|group| group.get(name)).map(|attr| attr.value().clone())
+    };
+    let status = if operation == Operation::PrintJob as i16 {
+        config.print_status
+    } else if operation == Operation::GetPrinterAttributes as i16 {
+        config.attributes_status
+    } else {
+        StatusCode::SuccessfulOk
+    };
     let mut response = IppRequestResponse::new_response(header.version, status, header.request_id).unwrap();
-    let attrs = response.attributes_mut();
-
     if let Some(message) = config.status_message {
-        attrs.add(DelimiterTag::OperationAttributes, attr("status-message", text(message)));
+        response.attributes_mut().add(DelimiterTag::OperationAttributes, attr("status-message", text(message)));
     }
 
-    if is_print_job {
-        if let Some(id) = config.job_id {
-            attrs.add(DelimiterTag::JobAttributes, attr("job-id", IppValue::Integer(id)));
+    if operation == Operation::PrintJob as i16 {
+        if status.is_success() {
+            print_job(&fake, &mut shared, &mut response);
         }
-        if let Some(state) = config.job_state {
-            attrs.add(DelimiterTag::JobAttributes, attr("job-state", state));
+    } else if operation == Operation::GetJobs as i16 {
+        let completed = operation_attr("which-jobs").is_some_and(|which| which.to_string() == "completed");
+        for job in shared.jobs.iter().filter(|job| job.is_finished() == completed) {
+            response.attributes_mut().groups_mut().push(job_group(job));
         }
-        if !config.job_state_reasons.is_empty() {
-            attrs.add(DelimiterTag::JobAttributes, attr("job-state-reasons", array(&config.job_state_reasons, keyword)));
+    } else if operation == Operation::GetJobAttributes as i16 {
+        let id = operation_attr("job-id").and_then(|id| id.as_integer().copied());
+        match shared.jobs.iter().find(|job| Some(job.id) == id) {
+            Some(job) => response.attributes_mut().groups_mut().push(job_group(job)),
+            None => response.header_mut().operation_or_status = StatusCode::ClientErrorNotFound as i16,
         }
+    } else if operation == Operation::GetPrinterAttributes as i16 {
+        printer_attributes(&config, &shared.jobs, &mut response);
     } else {
-        let printer = DelimiterTag::PrinterAttributes;
-        attrs.add(printer, attr("document-format-supported", array(&config.formats, mime)));
-        if let Some(name) = config.printer_name {
-            attrs.add(printer, attr("printer-name", IppValue::NameWithoutLanguage(BoundedString::new(name).unwrap())));
-        }
-        if let Some(info) = config.printer_info {
-            attrs.add(printer, attr("printer-info", text(info)));
-        }
-        if let Some(model) = config.model {
-            attrs.add(printer, attr("printer-make-and-model", text(model)));
-        }
-        if !config.raster_resolutions.is_empty() {
-            let resolutions = config
-                .raster_resolutions
-                .iter()
-                .map(|&dpi| IppValue::Resolution { cross_feed: dpi, feed: dpi, units: 3 })
-                .collect();
-            attrs.add(printer, attr("pwg-raster-document-resolution-supported", IppValue::Array(resolutions)));
-        }
-        if !config.raster_types.is_empty() {
-            attrs.add(printer, attr("pwg-raster-document-type-supported", array(&config.raster_types, keyword)));
-        }
+        response.header_mut().operation_or_status = StatusCode::ServerErrorOperationNotSupported as i16;
     }
 
     ([(header::CONTENT_TYPE, "application/ipp")], response.to_bytes()).into_response()
+}
+
+fn print_job(fake: &Fake, shared: &mut Shared, response: &mut IppRequestResponse) {
+    let config = shared.config.clone();
+    let attrs = response.attributes_mut();
+    if let Some(first) = config.job_id {
+        let id = first + shared.jobs_created;
+        shared.jobs_created += 1;
+        shared.jobs.push(FakeJob { id, state: JobState::Pending });
+        fake.raise(shared, "job-created");
+        attrs.add(DelimiterTag::JobAttributes, attr("job-id", IppValue::Integer(id)));
+    }
+    if let Some(state) = config.job_state {
+        attrs.add(DelimiterTag::JobAttributes, attr("job-state", state));
+    }
+    if !config.job_state_reasons.is_empty() {
+        attrs.add(DelimiterTag::JobAttributes, attr("job-state-reasons", array(&config.job_state_reasons, keyword)));
+    }
+}
+
+fn job_group(job: &FakeJob) -> IppAttributeGroup {
+    let mut result = IppAttributeGroup::new(DelimiterTag::JobAttributes);
+    result.attributes_mut().extend([
+        attr("job-id", IppValue::Integer(job.id)),
+        attr("job-state", IppValue::Enum(job.state as i32)),
+        attr("job-state-reasons", keyword("none")),
+    ]);
+    result
+}
+
+fn printer_attributes(config: &Config, jobs: &[FakeJob], response: &mut IppRequestResponse) {
+    let printer = DelimiterTag::PrinterAttributes;
+    let attrs = response.attributes_mut();
+    attrs.add(printer, attr("document-format-supported", array(&config.formats, mime)));
+    if let Some(name) = config.printer_name {
+        attrs.add(printer, attr("printer-name", IppValue::NameWithoutLanguage(BoundedString::new(name).unwrap())));
+    }
+    if let Some(info) = config.printer_info {
+        attrs.add(printer, attr("printer-info", text(info)));
+    }
+    if let Some(model) = config.model {
+        attrs.add(printer, attr("printer-make-and-model", text(model)));
+    }
+    if !config.raster_resolutions.is_empty() {
+        let resolutions = config
+            .raster_resolutions
+            .iter()
+            .map(|&dpi| IppValue::Resolution { cross_feed: dpi, feed: dpi, units: 3 })
+            .collect();
+        attrs.add(printer, attr("pwg-raster-document-resolution-supported", IppValue::Array(resolutions)));
+    }
+    if !config.raster_types.is_empty() {
+        attrs.add(printer, attr("pwg-raster-document-type-supported", array(&config.raster_types, keyword)));
+    }
+
+    attrs.add(printer, attr("printer-state", IppValue::Enum(config.printer_state as i32)));
+    let reasons = if config.printer_state_reasons.is_empty() { vec!["none"] } else { config.printer_state_reasons.clone() };
+    attrs.add(printer, attr("printer-state-reasons", array(&reasons, keyword)));
+    if let Some(message) = config.printer_state_message {
+        attrs.add(printer, attr("printer-state-message", text(message)));
+    }
+    let queued = jobs.iter().filter(|job| !job.is_finished()).count();
+    attrs.add(printer, attr("queued-job-count", IppValue::Integer(queued as i32)));
+    if config.notifications {
+        attrs.add(printer, attr("notify-pull-method-supported", keyword("ippget")));
+    }
+}
+
+/// Answer Create-Printer-Subscriptions, Cancel-Subscription or
+/// Get-Notifications, which the `ipp` crate can't parse.
+async fn handle_subscription(fake: &Fake, operation: u16, body: &[u8]) -> Response {
+    let Ok(request) = Message::decode(body) else {
+        return (HttpStatus::BAD_REQUEST, "malformed IPP request").into_response();
+    };
+    let operation_attr = |name: &str| {
+        request.groups_of(events::OPERATION_ATTRIBUTES).find_map(|group| group.first(name)).and_then(Value::as_integer)
+    };
+    let config = {
+        let mut shared = fake.shared.lock().unwrap();
+        shared.received.push(Received { operation: operation as i16, attributes: IppAttributes::new(), document: Vec::new() });
+        shared.config.clone()
+    };
+    if !config.online {
+        return (HttpStatus::SERVICE_UNAVAILABLE, "offline").into_response();
+    }
+    if !config.notifications {
+        return ipp_response(Message::response(events::SERVER_ERROR_OPERATION_NOT_SUPPORTED, request.request_id));
+    }
+
+    let response = match operation {
+        events::CREATE_PRINTER_SUBSCRIPTIONS => {
+            let mut shared = fake.shared.lock().unwrap();
+            shared.subscriptions_created += 1;
+            let id = shared.subscriptions_created;
+            shared.subscriptions.push(id);
+            let mut response = Message::response(0, request.request_id);
+            response.add(events::SUBSCRIPTION_ATTRIBUTES, "notify-subscription-id", vec![Value::integer(id)]);
+            response
+        }
+        events::CANCEL_SUBSCRIPTION => {
+            let id = operation_attr("notify-subscription-id");
+            fake.shared.lock().unwrap().subscriptions.retain(|subscription| Some(*subscription) != id);
+            Message::response(0, request.request_id)
+        }
+        _ => {
+            let id = operation_attr("notify-subscription-ids");
+            let first = operation_attr("notify-sequence-numbers").unwrap_or(1).max(1) as usize;
+            let wait = request
+                .groups_of(events::OPERATION_ATTRIBUTES)
+                .find_map(|group| group.first("notify-wait"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            notifications(fake, id, first, wait, &config, request.request_id).await
+        }
+    };
+    ipp_response(response)
+}
+
+async fn notifications(fake: &Fake, id: Option<i32>, first: usize, wait: bool, config: &Config, request_id: i32) -> Message {
+    let mut event_count = fake.event_count.subscribe();
+    let mut waited = !wait;
+    let mut woken = false;
+    loop {
+        let (known, pending) = {
+            let shared = fake.shared.lock().unwrap();
+            let known = id.is_some_and(|id| shared.subscriptions.contains(&id));
+            let pending: Vec<(usize, &'static str)> =
+                shared.events.iter().enumerate().map(|(index, event)| (index + 1, *event)).filter(|(sequence, _)| *sequence >= first).collect();
+            (known, pending)
+        };
+        if !known {
+            return Message::response(events::CLIENT_ERROR_NOT_FOUND, request_id);
+        }
+        if woken && config.notify_wakes_empty {
+            return Message::response(0, request_id);
+        }
+        if !pending.is_empty() || waited {
+            let mut response = Message::response(0, request_id);
+            response.add(events::OPERATION_ATTRIBUTES, "notify-get-interval", vec![Value::integer(30)]);
+            for (sequence, event) in pending {
+                response.start_group(events::EVENT_NOTIFICATION_ATTRIBUTES);
+                response.add(events::EVENT_NOTIFICATION_ATTRIBUTES, "notify-subscription-id", vec![Value::integer(id.unwrap_or_default())]);
+                response.add(events::EVENT_NOTIFICATION_ATTRIBUTES, "notify-sequence-number", vec![Value::integer(sequence as i32)]);
+                response.add(events::EVENT_NOTIFICATION_ATTRIBUTES, "notify-subscribed-event", vec![Value::keyword(event)]);
+            }
+            return response;
+        }
+        woken = tokio::time::timeout(config.notify_wait, event_count.changed()).await.is_ok();
+        waited = true;
+    }
+}
+
+fn ipp_response(message: Message) -> Response {
+    ([(header::CONTENT_TYPE, "application/ipp")], message.encode()).into_response()
 }
 
 fn attr(name: &str, value: IppValue) -> IppAttribute {
@@ -300,6 +589,19 @@ pub fn pdf(pages: &[(f32, f32)]) -> Vec<u8> {
         format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes(),
     );
     out
+}
+
+/// Monitor timings short enough for tests.
+pub fn quick_timings() -> inkdrop::status::Timings {
+    inkdrop::status::Timings {
+        idle_poll: Duration::from_millis(100),
+        busy_poll: Duration::from_millis(50),
+        min_gap: Duration::from_millis(10),
+        viewer_check: Duration::from_millis(10),
+        lease: Duration::from_secs(60),
+        request_timeout: Duration::from_secs(5),
+        retry_streaming: Duration::from_millis(300),
+    }
 }
 
 /// An A4 page, in points.

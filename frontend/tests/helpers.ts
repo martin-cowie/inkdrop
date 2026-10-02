@@ -3,7 +3,7 @@
  * @module
  */
 import { vi } from 'vitest';
-import type { Printer } from '../src/app';
+import type { Printer, PrinterStatus } from '../src/app';
 
 /**
  * A printer as the server would list it.
@@ -17,8 +17,18 @@ export function printer(overrides: Partial<Printer> = {}): Printer {
     uri: 'ipp://10.0.0.5:631/ipp/print',
     model: 'LaserJet 9000',
     formats: ['PDF', 'URF'],
+    status: null,
     ...overrides,
   };
+}
+
+/**
+ * A printer status as the server would report it: idle with nothing queued.
+ * @param overrides - Fields to change from the defaults.
+ * @returns The status.
+ */
+export function status(overrides: Partial<PrinterStatus> = {}): PrinterStatus {
+  return { state: 'idle', reasons: [], message: null, queued: 0, jobs: [], finished: [], ...overrides };
 }
 
 /** Stands in for the server's printer event stream. */

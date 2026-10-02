@@ -116,14 +116,14 @@ async fn serves_configured_printers_prints_and_stops_cleanly() {
     assert_eq!(pdf_view["formats"], serde_json::json!(["PDF"]));
     assert_eq!(raster_view["formats"], serde_json::json!(["PWG-Raster"]));
 
-    assert_eq!(upload(&base, pdf_view["id"].as_str().unwrap()).await, 204);
+    assert_eq!(upload(&base, pdf_view["id"].as_str().unwrap()).await, 200);
     let jobs = pdf_printer.print_jobs();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].attr("document-format").as_deref(), Some("application/pdf"));
     assert_eq!(jobs[0].attr("job-name").as_deref(), Some("upload.pdf"));
     assert_eq!(jobs[0].document, support::pdf(&[A4]));
 
-    assert_eq!(upload(&base, raster_view["id"].as_str().unwrap()).await, 204);
+    assert_eq!(upload(&base, raster_view["id"].as_str().unwrap()).await, 200);
     let jobs = raster_printer.print_jobs();
     assert_eq!(jobs[0].attr("document-format").as_deref(), Some("image/pwg-raster"));
     assert_eq!(&jobs[0].document[..4], b"RaS2");
