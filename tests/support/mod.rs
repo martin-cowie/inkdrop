@@ -197,17 +197,26 @@ impl FakePrinter {
     ///
     /// If it can't bind a port.
     pub async fn start_on(ip: IpAddr, config: Config) -> Self {
+        Self::start_at(SocketAddr::new(ip, 0), config).await.expect("bind fake printer")
+    }
+
+    /// Start on `addr`, answering as `config` says.
+    ///
+    /// # Errors
+    ///
+    /// If `addr` can't be bound, e.g. because the port is in use.
+    pub async fn start_at(addr: SocketAddr, config: Config) -> std::io::Result<Self> {
         let fake = Arc::new(Fake {
             shared: Mutex::new(Shared { config, ..Shared::default() }),
             event_count: watch::channel(0).0,
         });
-        let listener = tokio::net::TcpListener::bind(SocketAddr::new(ip, 0)).await.expect("bind fake printer");
-        let addr = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let addr = listener.local_addr()?;
         let app = axum::Router::new().fallback(handle).with_state(fake.clone());
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        FakePrinter { addr, fake, task }
+        Ok(FakePrinter { addr, fake, task })
     }
 
     /// The port the printer listens on.
@@ -226,6 +235,11 @@ impl FakePrinter {
         let mut shared = self.fake.shared.lock().unwrap();
         change(&mut shared.config);
         self.fake.raise(&mut shared, "printer-state-changed");
+    }
+
+    /// The printer's current [`Config`].
+    pub fn config(&self) -> Config {
+        self.fake.shared.lock().unwrap().config.clone()
     }
 
     /// Every request received so far, oldest first.

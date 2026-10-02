@@ -145,6 +145,33 @@ docker compose exec ipp-server ippdoclint -v -i image/pwg-raster /spool/ipp-sim/
 
 Server logs: `docker compose logs -f ipp-server`.
 
+### Fake printer for manual testing
+
+To try out the printer state and job tracking by hand, run the fake printer
+the automated tests use, and drive it by typing commands:
+
+```sh
+cargo run --example fake-printer          # ipp://127.0.0.1:1632/ipp/print
+INKDROP_PRINTERS=ipp://127.0.0.1:1632/ipp/print cargo run    # in another terminal
+```
+
+inkdrop still lists any real printers it finds on the network, so drop files
+on the "Fake Printer" tile. It prints queued jobs one at a time, taking 10 seconds each (`--speed` to
+change it), and reports each job as it arrives. Type `help` for the
+commands, such as:
+
+- `stop media-empty-error`, `stop media-jam-error cover-open-error`, then
+  `start`: stop the printer with those reasons, and start it again.
+- `reasons toner-low-warning`: a warning while the printer carries on.
+- `hold 3`, `release 3`, `cancel 3`, `abort 3`, `complete 3`: change a job.
+- `forget 3`: forget a job, as printers that keep little history do.
+- `offline`, `online`: stop and start answering requests.
+- `auto off`: stop printing jobs by itself, so that only commands move them.
+- `status`: show the printer and its queue.
+
+`--no-notifications` makes it a printer without IPP event notifications,
+which inkdrop polls instead, and `--raster` one that only takes PWG-Raster.
+
 ## Troubleshooting
 
 - **No printers show up**: Confirm the printer and this machine are on the
